@@ -1,0 +1,117 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Linker files
+*.ilk
+
+# Debugger Files
+*.pdb
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# debug information files
+*.dwo
+
+# ESP-IDF specific files
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.defaults
+
+# ESP-IDF build artifacts
+*.bin
+*.elf
+*.map
+*.dump
+*.bin.gz
+*.elf.gz
+
+# ESP-IDF flash files
+flash_args
+flash_project_args
+flash_app_args
+flash_bootloader_args
+
+# ESP-IDF component manager
+dependencies.lock
+managed_components/
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Ninja
+.ninja_deps
+.ninja_log
+build.ninja
+
+# GDB
+.gdbinit
+gdbinit/
+
+# Partition table
+partitions.csv
+partitions.bin
+
+# Certificates
+*.pem
+*.key
+*.crt
+
+# Custom component build artifacts
+paermkn/build/
