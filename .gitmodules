@@ -4,6 +4,3 @@
 [submodule "components/u8g2"]
 	path = components/u8g2
 	url = https://github.com/olikraus/u8g2.git
-[submodule "components/astraui_lite"]
-	path = components/astraui_lite
-	url = https://github.com/AstraThreshold/oled-ui-astra-lite

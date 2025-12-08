@@ -22,7 +22,6 @@
 static const char *TAG = "AstraUI_Example";
 
 // 全局变量
-u8g2_t u8g2;
 static bool switch_value = false;
 static int16_t slider_value = 50;
 
@@ -142,73 +141,27 @@ void button_task(void *pvParameters) {
  */
 void display_task(void *pvParameters) {
     ESP_LOGI(TAG, "Display task started");
-    
-    // 初始化 u8g2
-    u8g2_esp32_hal_t u8g2_esp32_hal = U8G2_ESP32_HAL_DEFAULT;
-    u8g2_esp32_hal.bus.i2c.sda = PIN_SDA;
-    u8g2_esp32_hal.bus.i2c.scl = PIN_SCL;
-    u8g2_esp32_hal_init(u8g2_esp32_hal);
-
-    // 初始化 u8g2 结构
-    u8g2_Setup_st7567_i2c_64x32_f(
-        &u8g2, U8G2_R0,
-        u8g2_esp32_i2c_byte_cb,
-        u8g2_esp32_gpio_and_delay_cb);
-    
-    // 设置 I2C 地址
-    u8x8_SetI2CAddress(&u8g2.u8x8, 0x3F);
-
-    ESP_LOGI(TAG, "Initializing display");
-    u8g2_InitDisplay(&u8g2);
-    u8g2_SetPowerSave(&u8g2, 0);
-    u8g2_ClearBuffer(&u8g2);
-    
-    // 设置 astraui_lite 使用的 u8g2 实例
-    astra_ui_set_u8g2(&u8g2);
-    
-    // 初始化 astraui_lite 驱动
+    // 仅保留 astraui_lite 主循环和小部件刷新
     astra_ui_driver_init();
-    
-    // 初始化菜单结构
     astra_ui_init_menu();
-    
-    // 显示欢迎信息
-    u8g2_SetFont(&u8g2, u8g2_font_ncenB08_tr);
-    u8g2_DrawStr(&u8g2, 10, 15, "AstraUI Lite");
-    u8g2_DrawStr(&u8g2, 10, 30, "System Ready");
-    u8g2_SendBuffer(&u8g2);
-    
+
     vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    // 主循环
+
     while (1) {
-        // 处理 astraui_lite 主循环
         astra_ui_main_core();
-        
-        // 如果没有在 astraui 模式中，显示默认界面
-        if (!in_astra) {
-            u8g2_ClearBuffer(&u8g2);
-            u8g2_SetFont(&u8g2, u8g2_font_6x10_tr);
-            u8g2_DrawStr(&u8g2, 10, 15, "系统运行中...");
-            u8g2_DrawStr(&u8g2, 10, 30, "长按按键进入菜单");
-            u8g2_SendBuffer(&u8g2);
-        }
-        
-        // 刷新小部件（信息栏、弹窗等）
         astra_ui_widget_core();
-        
         vTaskDelay(pdMS_TO_TICKS(50));  // 20 FPS
     }
 }
 
-extern "C" void app_main(void) {
+void app_main(void) {
     ESP_LOGI(TAG, "Starting AstraUI Lite Example");
-    
+
     // 创建显示任务
     xTaskCreate(display_task, "display_task", 8192, NULL, 5, NULL);
-    
+
     // 创建按键处理任务
     xTaskCreate(button_task, "button_task", 4096, NULL, 3, NULL);
-    
+
     ESP_LOGI(TAG, "AstraUI Lite Example started");
 }
