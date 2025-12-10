@@ -113,5 +113,3 @@ partitions.bin
 *.key
 *.crt
 
-# Custom component build artifacts
-paermkn/build/
