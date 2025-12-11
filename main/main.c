@@ -15,7 +15,7 @@
 #define OLED_I2C_ADDRESS            0x3C      
 
 static const char* TAG = "HelloWorld";
-const void* astra_font = u8g2_font_my_chinese;
+const void* astra_font = u8g2_font_wqy16_t_chinese3;
 const void* astra_font_en = u8g2_font_6x10_tf;
 
 // I2C主设备句柄

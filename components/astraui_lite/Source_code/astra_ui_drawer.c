@@ -147,7 +147,7 @@ void astra_draw_info_bar()
   int16_t _y_info_bar_1 = astra_info_bar.y_info_bar - 4;
   int16_t _y_info_bar_2 = astra_info_bar.y_info_bar + INFO_BAR_HEIGHT;
 
-  astra_set_font((const void*)u8g2_font_my_chinese);
+  astra_set_font((const void*)u8g2_font_wqy16_t_chinese3);
   oled_set_draw_color(1);
   oled_draw_R_box(_x_info_bar + 3, _y_info_bar_1 + 3,
                   (int16_t)astra_info_bar.w_info_bar, INFO_BAR_HEIGHT + 4, 4);
@@ -188,7 +188,7 @@ void astra_draw_pop_up()
   int16_t _x_pop_up = OLED_WIDTH/2 - astra_pop_up.w_pop_up/2;
   int16_t _y_pop_up = astra_pop_up.y_pop_up + POP_UP_HEIGHT;
 
-  astra_set_font((const void*)u8g2_font_my_chinese);
+  astra_set_font((const void*)u8g2_font_wqy16_t_chinese3);
   oled_set_draw_color(1); //阴影打底
   oled_draw_R_box(_x_pop_up + 1, (int16_t)astra_pop_up.y_pop_up + 3,
                   (int16_t)(astra_pop_up.w_pop_up + 4),
@@ -365,7 +365,7 @@ void astra_draw_list_item()
         astra_draw_list_icon(astra_selector.selected_item->parent->child_list_item[i]->icon, _x_list_item, _y_list_item);
     }
 
-    astra_set_font((const void*)u8g2_font_my_chinese);
+    astra_set_font((const void*)u8g2_font_wqy16_t_chinese3);
     if (_y_list_item + oled_get_str_height() / 2 > LIST_INFO_BAR_HEIGHT && _y_list_item + oled_get_str_height() / 2 < SCREEN_HEIGHT)
       oled_draw_UTF8(10 + _x_list_item, _y_list_item + oled_get_str_height() / 2,
                    astra_selector.selected_item->parent->child_list_item[i]->content);

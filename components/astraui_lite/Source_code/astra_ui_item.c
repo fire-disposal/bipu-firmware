@@ -40,7 +40,7 @@ void astra_push_info_bar(char *_content, const uint16_t _span)
     astra_info_bar.is_running = true;
   }
 
-  astra_set_font(u8g2_font_my_chinese);
+  astra_set_font(u8g2_font_wqy16_t_chinese3);
   astra_info_bar.w_info_bar_trg = oled_get_UTF8_width(astra_info_bar.content) + INFO_BAR_OFFSET;
 }
 
@@ -61,7 +61,7 @@ void astra_push_pop_up(char *_content, const uint16_t _span)
     astra_pop_up.is_running = true;
   }
 
-  astra_set_font(u8g2_font_my_chinese);
+  astra_set_font(u8g2_font_wqy16_t_chinese3);
   astra_pop_up.w_pop_up_trg = oled_get_UTF8_width(astra_pop_up.content) + POP_UP_OFFSET;
 }
 
@@ -433,7 +433,7 @@ bool astra_push_item_to_list(astra_list_item_t *_parent, astra_list_item_t *_chi
   _child->layer = _parent->layer + 1;
   _child->child_num = 0;
 
-  astra_set_font(u8g2_font_my_chinese);
+  astra_set_font(u8g2_font_wqy16_t_chinese3);
   if (_parent->child_num == 0) _child->y_list_item_trg = oled_get_str_height() + LIST_FONT_TOP_MARGIN - 1;
   else _child->y_list_item_trg = _parent->child_list_item[_parent->child_num - 1]->y_list_item_trg + LIST_ITEM_SPACING;
 
