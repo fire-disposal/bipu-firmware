@@ -7,6 +7,7 @@
 #include "driver/i2c.h"
 #include "astra_ui_core.h"
 #include "astra_ui_draw_driver.h"
+#include "astra_ui_item.h"
 
 #define I2C_MASTER_SCL_IO           GPIO_NUM_1      // SCL引脚
 #define I2C_MASTER_SDA_IO           GPIO_NUM_2      // SDA引脚
@@ -149,17 +150,41 @@ static void display_hello_world(void)
     ESP_LOGI(TAG, "Hello World 显示完成");
 }
 
+// AstraUI最小合法结构初始化
+void astra_ui_minimal_init(void)
+{
+    // 正确做法：先获取根节点，依次添加子项，最后初始化 AstraUI
+    static bool switch_val = false;
+    static int16_t slider_val = 5;
+
+    astra_list_item_t* root = astra_get_root_list();
+
+    // 创建并添加各类UI项
+    astra_list_item_t* item_switch = astra_new_switch_item("开关项", &switch_val, NULL, NULL, default_icon);
+    astra_push_item_to_list(root, item_switch);
+
+    astra_list_item_t* item_button = astra_new_button_item("按钮项", NULL, default_icon);
+    astra_push_item_to_list(root, item_button);
+
+    astra_list_item_t* item_slider = astra_new_slider_item("滑块项", &slider_val, 1, 0, 10, NULL, NULL, default_icon);
+    astra_push_item_to_list(root, item_slider);
+
+    astra_list_item_t* item_user = astra_new_user_item("自定义项", NULL, NULL, NULL, default_icon);
+    astra_push_item_to_list(root, item_user);
+
+    // 必须先添加完所有子项再初始化
+    astra_init_core();
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "开始Hello World示例...");
-    
     // 初始化I2C总线
     esp_err_t ret = i2c_master_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "I2C初始化失败，程序终止");
         return;
     }
-    
     // 使用u8g2内置SSD1309 I2C驱动
     u8g2_Setup_ssd1309_i2c_128x64_noname0_f(
         &u8g2,
@@ -167,42 +192,32 @@ void app_main(void)
         esp_idf_i2c_byte_cb,
         esp_idf_gpio_and_delay_cb
     );
-    
     // 执行显示初始化
     u8g2_InitDisplay(&u8g2);
     u8g2_SetPowerSave(&u8g2, 0);
-    
 
     ESP_LOGI(TAG, "OLED显示初始化完成");
-    
+
     // 显示Hello World
     display_hello_world(); 
-    
+
     // 延时2秒
     vTaskDelay(pdMS_TO_TICKS(2000));
-// ===== AstraUI最小合法结构初始化 =====
-#include "astra_ui_item.h"
-static void astra_ui_minimal_init(void) {
-    // 创建根列表
-    astra_list_item_t *root = astra_get_root_list();
-    // 创建一个简单的子项
-    astra_list_item_t *item = astra_new_list_item("主页", default_icon);
-    // 绑定子项到根列表
-    astra_push_item_to_list(root, item);
-    // 初始化并绑定selector/camera
-    astra_init_core();
-}
-    
+
     // 初始化AstraUI驱动层
     ESP_LOGI(TAG, "初始化AstraUI驱动层...");
     astra_ui_driver_init();
     ESP_LOGI(TAG, "AstraUI驱动层初始化完成");
 
-    
+    // AstraUI最小合法结构初始化
+    astra_ui_minimal_init();
+
     // 主循环 - 可以在这里添加更多功能
     while (1) {
         ad_astra(); // 检查是否进入AstraUI
+        u8g2_ClearBuffer(&u8g2);
         astra_ui_main_core(); // AstraUI主渲染逻辑
+        u8g2_SendBuffer(&u8g2); // 刷新显示缓冲区，确保AstraUI内容显示
         vTaskDelay(pdMS_TO_TICKS(100));  // 更高刷新率
     }
 }
