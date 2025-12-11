@@ -7,5 +7,4 @@ set(EXTRA_COMPONENT_DIRS
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-# The name of your project executable
 project(bipupu)

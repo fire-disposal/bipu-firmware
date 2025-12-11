@@ -1,368 +1,208 @@
-/**
- * @file main.c
- * @brief AstraUI Lite 在 ESP-IDF 环境下的主程序
- * @author Kilo Code
- * @date 2025-12-10
- * 
- * 本程序实现了 AstraUI Lite 与 u8g2_hal_esp_idf 的稳健集成，
- * 采用分层架构设计，确保代码清晰、安全、可维护。
- */
-
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "esp_system.h"
-#include "driver/gpio.h"
-#include "driver/i2c_master.h"
-
 #include "u8g2.h"
+#include "driver/i2c.h"
 #include "astra_ui_core.h"
-#include "astra_ui_item.h"
+#include "astra_ui_draw_driver.h"
 
-/*==============================================================================
- * 宏定义和配置
- *============================================================================*/
-#define TAG "AstraUI_System"
+#define I2C_MASTER_SCL_IO           GPIO_NUM_1      // SCL引脚
+#define I2C_MASTER_SDA_IO           GPIO_NUM_2      // SDA引脚
+#define I2C_MASTER_FREQ_HZ          400000           // I2C时钟频率
+#define OLED_I2C_ADDRESS            0x3C      
 
+static const char* TAG = "HelloWorld";
+const void* astra_font = u8g2_font_my_chinese;
+const void* astra_font_en = u8g2_font_6x10_tf;
 
-// 按键配置
-#define BUTTON_COUNT         4
-#define BUTTON_GPIO_PINS     {GPIO_NUM_10, GPIO_NUM_11, GPIO_NUM_12, GPIO_NUM_13}
-#define BUTTON_DEBOUNCE_MS   50
-#define BUTTON_LONG_PRESS_MS 1500
-
-// 任务配置
-#define DISPLAY_TASK_STACK_SIZE  8192
-#define DISPLAY_TASK_PRIORITY    5
-#define BUTTON_TASK_STACK_SIZE   4096
-#define BUTTON_TASK_PRIORITY     3
-
-// 系统配置
-#define SYSTEM_INFO_UPDATE_MS    1000
-#define UI_REFRESH_INTERVAL_MS   50
-
-/*==============================================================================
- * 类型定义
- *============================================================================*/
-typedef struct {
-    gpio_num_t gpio_pin;
-    bool current_state;
-    bool last_state;
-    uint32_t press_start_time;
-    bool is_pressed;
-} button_t;
-
-typedef struct {
-    u8g2_t u8g2;
-    button_t buttons[BUTTON_COUNT];
-    bool system_initialized;
-    uint32_t last_info_update;
-} system_context_t;
-
-/*==============================================================================
- * 静态变量
- *============================================================================*/
-static system_context_t g_system = {0};
-static const gpio_num_t button_gpio_pins[BUTTON_COUNT] = BUTTON_GPIO_PINS;
-
-/*==============================================================================
- * 函数前向声明
- *============================================================================*/
-static esp_err_t system_hardware_init(void);
-static esp_err_t button_system_init(void);
-static void button_task(void *pvParameters);
-static void display_task(void *pvParameters);
-static void process_button_input(void);
-static void update_system_info(void);
-static void create_ui_menu(void);
-static void user_item_init(void);
-static void user_item_loop(void);
-static void user_item_exit(void);
-static void handle_ui_navigation(void) {
-    // TODO: 补全导航逻辑
-}
-
-// 外部变量声明
-extern bool in_astra;
-
-/*==============================================================================
- * 硬件初始化函数
- *============================================================================*/
+// I2C主设备句柄
+static i2c_port_t s_i2c_port = I2C_NUM_0;
+// 将u8g2改为全局变量，以便AstraUI驱动层可以访问
+u8g2_t u8g2;
 
 /**
- * @brief 系统硬件初始化
- * @return ESP_OK 成功，其他值表示失败
+ * @brief ESP-IDF原生I2C字节传输回调函数
  */
-static esp_err_t system_hardware_init(void)
+static uint8_t esp_idf_i2c_byte_cb(u8x8_t* u8x8, uint8_t msg, uint8_t arg_int, void* arg_ptr)
 {
-    ESP_LOGI(TAG, "初始化系统硬件...");
-    
-    // 完全交由UI框架处理显示初始化
-    if (astra_ui_display_init(&g_system.u8g2) != ESP_OK)
-        return ESP_FAIL;
-    
-    if (button_system_init() != ESP_OK)
-        return ESP_FAIL;
-    g_system.system_initialized = true;
-    ESP_LOGI(TAG, "系统硬件初始化完成");
-    return ESP_OK;
+    static uint8_t buffer[128];
+    static uint8_t buf_idx = 0;
+    esp_err_t ret;
+
+    switch (msg) {
+        case U8X8_MSG_BYTE_INIT:
+            // I2C初始化在main函数中完成
+            break;
+
+        case U8X8_MSG_BYTE_START_TRANSFER:
+            buf_idx = 0;
+            break;
+
+        case U8X8_MSG_BYTE_SEND:
+            {
+                uint8_t* data = (uint8_t*)arg_ptr;
+                for (int i = 0; i < arg_int; i++) {
+                    if (buf_idx < sizeof(buffer)) {
+                        buffer[buf_idx++] = data[i];
+                    }
+                }
+            }
+            break;
+
+        case U8X8_MSG_BYTE_END_TRANSFER:
+            {
+                i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+                i2c_master_start(cmd);
+                i2c_master_write_byte(cmd, (OLED_I2C_ADDRESS << 1) | I2C_MASTER_WRITE, true);
+                i2c_master_write(cmd, buffer, buf_idx, true);
+                i2c_master_stop(cmd);
+                ret = i2c_master_cmd_begin(s_i2c_port, cmd, pdMS_TO_TICKS(100));
+                i2c_cmd_link_delete(cmd);
+                if (ret != ESP_OK) {
+                    ESP_LOGE(TAG, "I2C传输失败: %d", ret);
+                    return 0;
+                }
+            }
+            break;
+
+        default:
+            return 0;
+    }
+
+    return 1;
 }
 
-
 /**
- * @brief 按键系统初始化
- * @return ESP_OK 成功，其他值表示失败
+ * @brief ESP-IDF原生GPIO和延时回调函数
  */
-static esp_err_t button_system_init(void)
+static uint8_t esp_idf_gpio_and_delay_cb(u8x8_t* u8x8, uint8_t msg, uint8_t arg_int, void* arg_ptr)
 {
-    ESP_LOGI(TAG, "初始化按键系统...");
-    
-    for (int i = 0; i < BUTTON_COUNT; i++) {
-        g_system.buttons[i].gpio_pin = button_gpio_pins[i];
-        g_system.buttons[i].current_state = true;  // 上拉，默认高电平
-        g_system.buttons[i].last_state = true;
-        g_system.buttons[i].is_pressed = false;
-        g_system.buttons[i].press_start_time = 0;
-        
-        // 配置 GPIO
-        gpio_config_t io_conf = {
-            .pin_bit_mask = (1ULL << button_gpio_pins[i]),
-            .mode = GPIO_MODE_INPUT,
-            .pull_up_en = GPIO_PULLUP_ENABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type = GPIO_INTR_DISABLE
-        };
-        
-        esp_err_t ret = gpio_config(&io_conf);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "按键 GPIO %d 配置失败", button_gpio_pins[i]);
-            return ret;
-        }
+    switch (msg) {
+        case U8X8_MSG_GPIO_AND_DELAY_INIT:
+            // GPIO初始化在I2C配置中完成
+            break;
+            
+        case U8X8_MSG_DELAY_MILLI:
+            vTaskDelay(pdMS_TO_TICKS(arg_int));
+            break;
+            
+        case U8X8_MSG_DELAY_10MICRO:
+            esp_rom_delay_us(10 * arg_int);
+            break;
+            
+        default:
+            break;
     }
     
-    ESP_LOGI(TAG, "按键系统初始化完成");
+    return 1;
+}
+
+/**
+ * @brief 初始化I2C总线
+ */
+static esp_err_t i2c_master_init(void)
+{
+    ESP_LOGI(TAG, "初始化I2C总线: SDA=%d, SCL=%d", I2C_MASTER_SDA_IO, I2C_MASTER_SCL_IO);
+
+    i2c_config_t conf = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_MASTER_SDA_IO,
+        .scl_io_num = I2C_MASTER_SCL_IO,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = I2C_MASTER_FREQ_HZ,
+    };
+    esp_err_t ret = i2c_param_config(s_i2c_port, &conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2C参数配置失败: %d", ret);
+        return ret;
+    }
+    ret = i2c_driver_install(s_i2c_port, I2C_MODE_MASTER, 0, 0, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2C驱动安装失败: %d", ret);
+        return ret;
+    }
+    ESP_LOGI(TAG, "I2C总线初始化成功");
     return ESP_OK;
 }
 
-/*==============================================================================
- * UI 相关函数
- *============================================================================*/
-
 /**
- * @brief 创建 UI 菜单结构
+ * @brief 显示Hello World
  */
-static void create_ui_menu(void)
+static void display_hello_world(void)
 {
-    ESP_LOGI(TAG, "创建 UI 菜单...");
+    // 清除缓冲区
+    u8g2_ClearBuffer(&u8g2);
     
-    // 获取根列表
-    astra_list_item_t *root = astra_get_root_list();
-    if (!root) {
-        ESP_LOGE(TAG, "无法获取根列表");
+    // 设置字体
+    u8g2_SetFont(&u8g2, u8g2_font_6x10_tf);
+    
+    // 绘制字符串
+    u8g2_DrawStr(&u8g2, 10, 30, "Hello World!");
+    u8g2_DrawStr(&u8g2, 10, 45, "bipupu!");
+    
+    // 发送缓冲区到显示
+    u8g2_SendBuffer(&u8g2);
+    
+    ESP_LOGI(TAG, "Hello World 显示完成");
+}
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "开始Hello World示例...");
+    
+    // 初始化I2C总线
+    esp_err_t ret = i2c_master_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2C初始化失败，程序终止");
         return;
     }
     
-    // 静态变量用于存储状态
-    static bool wifi_switch_value = false;
-    static int16_t brightness_value = 50;
+    // 使用u8g2内置SSD1309 I2C驱动
+    u8g2_Setup_ssd1309_i2c_128x64_noname0_f(
+        &u8g2,
+        U8G2_R0,
+        esp_idf_i2c_byte_cb,
+        esp_idf_gpio_and_delay_cb
+    );
     
-    // 添加菜单项
-    astra_push_item_to_list(root, astra_new_list_item("系统信息", list_icon));
-    astra_push_item_to_list(root, astra_new_list_item("OLED状态", list_icon));
-    astra_push_item_to_list(root, astra_new_list_item("按键测试", list_icon));
-    astra_push_item_to_list(root, astra_new_switch_item("WiFi", &wifi_switch_value, NULL, NULL, switch_icon));
-    astra_push_item_to_list(root, astra_new_slider_item("亮度", &brightness_value, 5, 0, 100, NULL, NULL, slider_icon));
-    astra_push_item_to_list(root, astra_new_button_item("重启系统", NULL, power_icon));
-    astra_push_item_to_list(root, astra_new_user_item("按键状态", user_item_init, user_item_loop, user_item_exit, user_icon));
+    // 执行显示初始化
+    u8g2_InitDisplay(&u8g2);
+    u8g2_SetPowerSave(&u8g2, 0);
     
-    // 初始化 UI 核心
+
+    ESP_LOGI(TAG, "OLED显示初始化完成");
+    
+    // 显示Hello World
+    display_hello_world(); 
+    
+    // 延时2秒
+    vTaskDelay(pdMS_TO_TICKS(2000));
+// ===== AstraUI最小合法结构初始化 =====
+#include "astra_ui_item.h"
+static void astra_ui_minimal_init(void) {
+    // 创建根列表
+    astra_list_item_t *root = astra_get_root_list();
+    // 创建一个简单的子项
+    astra_list_item_t *item = astra_new_list_item("主页", default_icon);
+    // 绑定子项到根列表
+    astra_push_item_to_list(root, item);
+    // 初始化并绑定selector/camera
     astra_init_core();
-    
-    ESP_LOGI(TAG, "UI 菜单创建完成");
 }
-
-/**
- * @brief 用户自定义项初始化
- */
-static void user_item_init(void)
-{
-    ESP_LOGI(TAG, "用户项初始化");
-}
-
-/**
- * @brief 用户自定义项主循环
- */
-static void user_item_loop(void)
-{
-    char buf[32];
     
-    u8g2_ClearBuffer(&g_system.u8g2);
-    u8g2_SetFont(&g_system.u8g2, u8g2_font_6x12_tf);
-    u8g2_DrawStr(&g_system.u8g2, 0, 12, "按键状态页面");
+    // 初始化AstraUI驱动层
+    ESP_LOGI(TAG, "初始化AstraUI驱动层...");
+    astra_ui_driver_init();
+    ESP_LOGI(TAG, "AstraUI驱动层初始化完成");
+
     
-    // 显示按键状态
-    for (int i = 0; i < BUTTON_COUNT; ++i) {
-        snprintf(buf, sizeof(buf), "KEY%d: %d", i + 1, g_system.buttons[i].is_pressed);
-        u8g2_DrawStr(&g_system.u8g2, 0, 28 + i * 16, buf);
-    }
-    
-    u8g2_SendBuffer(&g_system.u8g2);
-}
-
-/**
- * @brief 用户自定义项退出
- */
-static void user_item_exit(void)
-{
-    ESP_LOGI(TAG, "用户项退出");
-}
-
-/*==============================================================================
- * 输入处理函数
- *============================================================================*/
-
-/**
- * @brief 处理按键输入
- */
-static void process_button_input(void)
-{
-    static bool long_press_detected = false;
-    static uint32_t long_press_start_time = 0;
-    
-    // 检查是否有按键被按下
-    bool any_button_pressed = false;
-    for (int i = 0; i < BUTTON_COUNT; i++) {
-        if (g_system.buttons[i].is_pressed) {
-            any_button_pressed = true;
-            break;
-        }
-    }
-    
-    if (any_button_pressed && !long_press_detected) {
-        if (long_press_start_time == 0) {
-            long_press_start_time = xTaskGetTickCount();
-        } else if ((xTaskGetTickCount() - long_press_start_time) > pdMS_TO_TICKS(BUTTON_LONG_PRESS_MS)) {
-            // 长按检测，进入 AstraUI
-            ESP_LOGI(TAG, "长按检测，进入 AstraUI");
-            extern bool in_astra;
-            in_astra = true;
-            long_press_detected = true;
-            long_press_start_time = 0;
-        }
-    } else {
-        long_press_detected = false;
-        long_press_start_time = 0;
-    }
-}
-
-
-/**
- * @brief 更新系统信息
- */
-static void update_system_info(void)
-{
-    uint32_t current_time = xTaskGetTickCount();
-    
-    if (current_time - g_system.last_info_update > pdMS_TO_TICKS(SYSTEM_INFO_UPDATE_MS)) {
-        // 可以在这里更新系统状态信息
-        g_system.last_info_update = current_time;
-    }
-}
-
-/*==============================================================================
- * 任务函数
- *============================================================================*/
-
-/**
- * @brief 按键处理任务
- */
-static void button_task(void *pvParameters)
-{
-    ESP_LOGI(TAG, "按键任务启动");
-    
+    // 主循环 - 可以在这里添加更多功能
     while (1) {
-        // 扫描按键状态
-        for (int i = 0; i < BUTTON_COUNT; i++) {
-            button_t *btn = &g_system.buttons[i];
-            bool current_reading = gpio_get_level(btn->gpio_pin);
-            
-            // 简单的消抖处理
-            if (current_reading != btn->last_state) {
-                vTaskDelay(pdMS_TO_TICKS(BUTTON_DEBOUNCE_MS));
-                current_reading = gpio_get_level(btn->gpio_pin);
-            }
-            
-            btn->current_state = current_reading;
-            btn->is_pressed = !current_reading;  // 低电平表示按下
-            
-            btn->last_state = current_reading;
-        }
-        
-        // 处理按键输入
-        process_button_input();
-        handle_ui_navigation();
-        
-        vTaskDelay(pdMS_TO_TICKS(10));  // 10ms 扫描间隔
+        ad_astra(); // 检查是否进入AstraUI
+        astra_ui_main_core(); // AstraUI主渲染逻辑
+        vTaskDelay(pdMS_TO_TICKS(100));  // 更高刷新率
     }
 }
-
-/**
- * @brief 显示任务
- */
-static void display_task(void *pvParameters)
-{
-    ESP_LOGI(TAG, "显示任务启动");
-    
-    // 创建 UI 菜单
-    create_ui_menu();
-    
-    // 显示启动信息
-    u8g2_ClearBuffer(&g_system.u8g2);
-    u8g2_SetFont(&g_system.u8g2, u8g2_font_6x12_tf);
-    u8g2_DrawStr(&g_system.u8g2, 0, 12, "AstraUI Lite");
-    u8g2_DrawStr(&g_system.u8g2, 0, 28, "系统启动中...");
-    u8g2_SendBuffer(&g_system.u8g2);
-    
-    vTaskDelay(pdMS_TO_TICKS(1000));  // 显示 1 秒启动信息
-    
-    while (1) {
-        // 更新系统信息
-        update_system_info();
-        
-        // 处理 UI 主循环
-        extern bool in_astra;
-        if (in_astra) {
-            astra_ui_main_core();    // UI 主逻辑
-            astra_ui_widget_core();  // UI 渲染
-        } else {
-            // 默认显示界面
-            u8g2_ClearBuffer(&g_system.u8g2);
-            u8g2_SetFont(&g_system.u8g2, u8g2_font_6x12_tf);
-            u8g2_DrawStr(&g_system.u8g2, 0, 12, "长按任意键");
-            u8g2_DrawStr(&g_system.u8g2, 0, 28, "进入 AstraUI");
-            u8g2_SendBuffer(&g_system.u8g2);
-        }
-        
-        vTaskDelay(pdMS_TO_TICKS(UI_REFRESH_INTERVAL_MS));
-    }
-}
-
-/*==============================================================================
- * 主函数
- *============================================================================*/
-
-/**
- * @brief 应用程序主入口
- */
-void app_main(void)
-{
-    ESP_LOGI(TAG, "AstraUI Lite ESP-IDF 系统启动");
-    if (system_hardware_init() != ESP_OK) return;
-    if (xTaskCreate(button_task, "button_task", BUTTON_TASK_STACK_SIZE, NULL, BUTTON_TASK_PRIORITY, NULL) != pdPASS) return;
-    if (xTaskCreate(display_task, "display_task", DISPLAY_TASK_STACK_SIZE, NULL, DISPLAY_TASK_PRIORITY, NULL) != pdPASS) return;
-    ESP_LOGI(TAG, "系统启动完成");
-}
-
