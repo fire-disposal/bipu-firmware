@@ -10,6 +10,7 @@ idf_component_register(
         nvs_flash
         u8g2
         astraui_lite
+        ui_display
 )
 
 
