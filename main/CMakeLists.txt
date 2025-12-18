@@ -1,16 +1,6 @@
 idf_component_register(
     SRCS
-        "main.c"
-    INCLUDE_DIRS
-        "."
+        "app_main.c"
     REQUIRES
-        driver
-        freertos
-        esp_timer
-        nvs_flash
-        u8g2
-        astraui_lite
-        ui_display
+        app
 )
-
-

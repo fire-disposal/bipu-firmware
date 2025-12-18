@@ -1,0 +1,10 @@
+idf_component_register(
+    SRCS
+        "ui.c"
+        "ui_pages.c"
+        "ui_widgets.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        drivers
+)
