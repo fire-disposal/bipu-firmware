@@ -1,6 +1,17 @@
 idf_component_register(
     SRCS
-        "app_main.c"
+        "main.c"
+        "app.c"
+        "ui.c"
+        "board.c"
+    INCLUDE_DIRS
+        "include"
     REQUIRES
-        app
+        u8g2
+        driver
+    PRIV_REQUIRES
+        esp_timer
+        freertos
+        nvs_flash
+        esp_rom
 )
