@@ -9,6 +9,7 @@ idf_component_register(
     REQUIRES
         u8g2
         driver
+        bt
     PRIV_REQUIRES
         esp_timer
         freertos

@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "board.h"  // 为了使用board_key_t类型
 
 // UI 状态枚举 - 简化为核心状态
 typedef enum {

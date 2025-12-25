@@ -8,10 +8,28 @@
 #include "rom/ets_sys.h"
 #include "u8g2.h"
 
+// BLE相关头文件
+#include "esp_gap_ble_api.h"
+#include "esp_gatts_api.h"
+#include "esp_bt.h"
+#include "esp_bt_main.h"
+#include "esp_gatt_common_api.h"
+#include "nvs_flash.h"
+
 /* ================== 私有状态 ================== */
 static u8g2_t s_u8g2;
 static uint32_t s_vibrate_end_time = 0;
 static bool s_vibrate_active = false;
+
+/* ================== BLE私有状态 ================== */
+static board_ble_state_t s_ble_state = BOARD_BLE_STATE_UNINITIALIZED;
+static bool s_ble_connected = false;
+static board_ble_message_cb_t s_ble_message_callback = NULL;
+static uint8_t s_ble_service_handle = 0;
+static uint8_t s_ble_char_handle = 0;
+static uint16_t s_ble_conn_id = 0xFFFF;
+static uint32_t s_ble_error_count = 0;
+static uint32_t s_ble_last_error_time = 0;
 
 /* ================== u8g2 回调函数 ================== */
 static uint8_t u8g2_esp32_i2c_byte_cb(
@@ -202,6 +220,14 @@ void board_init(void)
 {
     ESP_LOGI(BOARD_TAG, "Initializing board...");
     
+    // 初始化NVS（用于BLE配置存储）
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+    
     // GPIO初始化
     gpio_init();
     
@@ -314,7 +340,7 @@ void board_vibrate_off(void)
 }
 
 /* ================== 震动状态管理 ================== */
-static void board_vibrate_tick(void)
+void board_vibrate_tick(void)
 {
     if (s_vibrate_active && s_vibrate_end_time > 0) {
         uint32_t current_time = board_time_ms();
@@ -395,14 +421,366 @@ void board_notify(void)
 }
 
 
+/* ================== BLE GATT服务器配置 ================== */
+// 使用标准的128位UUID格式
+static const uint8_t s_ble_service_uuid[16] = {
+    0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static const uint8_t s_ble_char_uuid[16] = {
+    0x78, 0x56, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+// 使用ESP-IDF推荐的UUID格式
+static const uint8_t s_ble_service_uuid_128[16] = {
+    /* LSB <--------------------------------------------------------------------------------> MSB */
+    // 自定义服务UUID: 00001234-0000-0000-0000-000000000000
+    0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static const uint8_t s_ble_char_uuid_128[16] = {
+    /* LSB <--------------------------------------------------------------------------------> MSB */
+    // 自定义特征UUID: 00005678-0000-0000-0000-000000000000
+    0x78, 0x56, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static const uint8_t s_ble_char_value[1] = {0x00};
+
+static esp_attr_value_t s_ble_char_attr_value = {
+    .attr_max_len = BOARD_BLE_MAX_MESSAGE_LEN,
+    .attr_len     = sizeof(s_ble_char_value),
+    .attr_value   = (uint8_t*)s_ble_char_value,
+};
+
+/* ================== BLE错误处理 ================== */
+static void ble_handle_error(const char* operation, esp_err_t error)
+{
+    s_ble_error_count++;
+    s_ble_last_error_time = board_time_ms();
+    s_ble_state = BOARD_BLE_STATE_ERROR;
+    
+    ESP_LOGE(BOARD_TAG, "BLE错误 - 操作: %s, 错误码: %s (0x%x)",
+             operation, esp_err_to_name(error), error);
+    
+    // 错误指示：红色LED闪烁
+    board_rgb_set_color(BOARD_RGB_RED);
+}
+
+/* ================== BLE状态字符串转换 ================== */
+const char* board_ble_state_to_string(board_ble_state_t state)
+{
+    switch (state) {
+        case BOARD_BLE_STATE_UNINITIALIZED: return "未初始化";
+        case BOARD_BLE_STATE_INITIALIZING:  return "初始化中";
+        case BOARD_BLE_STATE_INITIALIZED:   return "已初始化";
+        case BOARD_BLE_STATE_ADVERTISING:   return "广播中";
+        case BOARD_BLE_STATE_CONNECTED:     return "已连接";
+        case BOARD_BLE_STATE_ERROR:         return "错误状态";
+        default: return "未知状态";
+    }
+}
+
+/* ================== BLE事件处理 ================== */
+static void ble_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param)
+{
+    switch (event) {
+        case ESP_GATTS_REG_EVT:
+            ESP_LOGI(BOARD_TAG, "GATT注册事件, app_id %d, status %d", param->reg.app_id, param->reg.status);
+            if (param->reg.status == ESP_GATT_OK) {
+                s_ble_service_handle = gatts_if;
+                s_ble_state = BOARD_BLE_STATE_INITIALIZED;
+                esp_gatt_srvc_id_t service_id = {
+                    .id = {
+                        .uuid = {
+                            .len = ESP_UUID_LEN_128,
+                            .uuid = {0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+                        },
+                        .inst_id = 0
+                    },
+                    .is_primary = true
+                };
+                esp_err_t ret = esp_ble_gatts_create_service(gatts_if, &service_id, 4);
+                if (ret != ESP_OK) {
+                    ble_handle_error("创建GATT服务", ret);
+                }
+            } else {
+                ble_handle_error("GATT注册", ESP_FAIL);
+            }
+            break;
+            
+        case ESP_GATTS_CREATE_EVT:
+            ESP_LOGI(BOARD_TAG, "GATT服务创建事件, status %d", param->create.status);
+            if (param->create.status == ESP_GATT_OK) {
+                s_ble_service_handle = param->create.service_handle;
+                s_ble_state = BOARD_BLE_STATE_ADVERTISING;
+                esp_err_t ret = esp_ble_gatts_start_service(param->create.service_handle);
+                if (ret != ESP_OK) {
+                    ble_handle_error("启动GATT服务", ret);
+                    break;
+                }
+                
+                esp_gatt_rsp_t rsp;
+                memset(&rsp, 0, sizeof(esp_gatt_rsp_t));
+                rsp.attr_value.handle = param->create.service_handle;
+                rsp.attr_value.len = 1;
+                rsp.attr_value.value[0] = 0x00;
+                
+                esp_bt_uuid_t char_uuid = {
+                    .len = ESP_UUID_LEN_128,
+                    .uuid = {.uuid128 = {0x78, 0x56, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}}
+                };
+                ret = esp_ble_gatts_add_char(param->create.service_handle,
+                                     &char_uuid,
+                                     ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+                                     ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
+                                     &s_ble_char_attr_value, NULL);
+                if (ret != ESP_OK) {
+                    ble_handle_error("添加GATT特征", ret);
+                }
+            } else {
+                ble_handle_error("创建GATT服务", ESP_FAIL);
+            }
+            break;
+            
+        case ESP_GATTS_ADD_CHAR_EVT:
+            ESP_LOGI(BOARD_TAG, "GATT特征添加事件, status %d, attr_handle %d",
+                    param->add_char.status, param->add_char.attr_handle);
+            if (param->add_char.status == ESP_GATT_OK) {
+                s_ble_char_handle = param->add_char.attr_handle;
+            } else {
+                ble_handle_error("添加GATT特征", ESP_FAIL);
+            }
+            break;
+            
+        case ESP_GATTS_START_EVT:
+            ESP_LOGI(BOARD_TAG, "GATT服务启动事件, status %d", param->start.status);
+            if (param->start.status == ESP_GATT_OK) {
+                ESP_LOGI(BOARD_TAG, "BLE服务已启动，开始广播...");
+            } else {
+                ble_handle_error("启动GATT服务", ESP_FAIL);
+            }
+            break;
+            
+        case ESP_GATTS_CONNECT_EVT:
+            ESP_LOGI(BOARD_TAG, "BLE连接事件, conn_id %d", param->connect.conn_id);
+            s_ble_connected = true;
+            s_ble_conn_id = param->connect.conn_id;
+            s_ble_state = BOARD_BLE_STATE_CONNECTED;
+            board_notify(); // 连接成功提醒
+            ESP_LOGI(BOARD_TAG, "BLE已连接，设备名称: %s", BOARD_BLE_DEVICE_NAME);
+            break;
+            
+        case ESP_GATTS_DISCONNECT_EVT:
+            ESP_LOGI(BOARD_TAG, "BLE断开连接事件, conn_id %d", param->disconnect.conn_id);
+            s_ble_connected = false;
+            s_ble_conn_id = 0xFFFF;
+            s_ble_state = BOARD_BLE_STATE_ADVERTISING;
+            board_rgb_off(); // 断开连接时关闭RGB灯
+            ESP_LOGI(BOARD_TAG, "BLE已断开，重新广播中...");
+            break;
+            
+        case ESP_GATTS_WRITE_EVT:
+            ESP_LOGI(BOARD_TAG, "GATT写事件, conn_id %d, handle %d, len %d",
+                    param->write.conn_id, param->write.handle, param->write.len);
+            
+            if (param->write.handle == s_ble_char_handle && param->write.len > 0) {
+                // 解析接收到的消息格式：sender|message
+                char received_data[BOARD_BLE_MAX_MESSAGE_LEN + 1] = {0};
+                memcpy(received_data, param->write.value, param->write.len);
+                received_data[param->write.len] = '\0';
+                
+                ESP_LOGI(BOARD_TAG, "接收到BLE消息: %s", received_data);
+                
+                // 解析消息格式
+                char* separator = strchr(received_data, '|');
+                if (separator != NULL) {
+                    *separator = '\0';
+                    char* sender = received_data;
+                    char* message = separator + 1;
+                    
+                    // 调用消息回调函数
+                    if (s_ble_message_callback != NULL) {
+                        s_ble_message_callback(sender, message);
+                    }
+                }
+            }
+            break;
+            
+        default:
+            break;
+    }
+}
+
 /* ================== BLE接口实现 ================== */
 void board_ble_init(void)
 {
-    // TODO: 实现BLE初始化
-    ESP_LOGI(BOARD_TAG, "BLE init placeholder");
+    if (s_ble_state != BOARD_BLE_STATE_UNINITIALIZED) {
+        ESP_LOGW(BOARD_TAG, "BLE已经初始化，当前状态: %s", board_ble_state_to_string(s_ble_state));
+        return;
+    }
+    
+    ESP_LOGI(BOARD_TAG, "初始化BLE...");
+    s_ble_state = BOARD_BLE_STATE_INITIALIZING;
+    
+    esp_err_t ret;
+    
+    // 1. 初始化蓝牙控制器
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ret = esp_bt_controller_init(&bt_cfg);
+    if (ret != ESP_OK) {
+        ble_handle_error("蓝牙控制器初始化", ret);
+        return;
+    }
+    
+    // 2. 使能蓝牙控制器
+    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+    if (ret != ESP_OK) {
+        ble_handle_error("蓝牙控制器使能", ret);
+        return;
+    }
+    
+    // 3. 初始化蓝牙协议栈
+    ret = esp_bluedroid_init();
+    if (ret != ESP_OK) {
+        ble_handle_error("蓝牙协议栈初始化", ret);
+        return;
+    }
+    
+    // 4. 使能蓝牙协议栈
+    ret = esp_bluedroid_enable();
+    if (ret != ESP_OK) {
+        ble_handle_error("蓝牙协议栈使能", ret);
+        return;
+    }
+    
+    // 5. 注册GATT回调函数
+    ret = esp_ble_gatts_register_callback(ble_event_handler);
+    if (ret != ESP_OK) {
+        ble_handle_error("GATT回调注册", ret);
+        return;
+    }
+    
+    // 6. 注册GATT应用
+    ret = esp_ble_gatts_app_register(0);
+    if (ret != ESP_OK) {
+        ble_handle_error("GATT应用注册", ret);
+        return;
+    }
+    
+    // 7. 设置设备名称
+    ret = esp_ble_gap_set_device_name(BOARD_BLE_DEVICE_NAME);
+    if (ret != ESP_OK) {
+        ble_handle_error("设置设备名称", ret);
+        return;
+    }
+    
+    // 8. 配置广播数据
+    esp_ble_adv_data_t adv_data = {
+        .set_scan_rsp = false,
+        .include_name = true,
+        .include_txpower = true,
+        .min_interval = 0x20,
+        .max_interval = 0x40,
+        .appearance = 0x00,
+        .manufacturer_len = 0,
+        .p_manufacturer_data = NULL,
+        .service_data_len = 0,
+        .p_service_data = NULL,
+        .service_uuid_len = ESP_UUID_LEN_128,
+        .p_service_uuid = (uint8_t*)s_ble_service_uuid_128,
+        .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
+    };
+    
+    ret = esp_ble_gap_config_adv_data(&adv_data);
+    if (ret != ESP_OK) {
+        ble_handle_error("配置广播数据", ret);
+        return;
+    }
+    
+    ESP_LOGI(BOARD_TAG, "BLE初始化完成，等待服务创建...");
 }
 
 void board_ble_poll(void)
 {
-    // TODO: 实现BLE消息轮询
+    // BLE事件通过回调函数处理，这里不需要轮询
+    // 可以在这里添加状态检查或心跳功能
+    if (s_ble_connected) {
+        // 可以添加连接状态指示，比如RGB灯闪烁
+        static uint32_t last_blink_time = 0;
+        uint32_t current_time = board_time_ms();
+        
+        if (current_time - last_blink_time > 1000) { // 每秒闪烁一次
+            static bool led_state = false;
+            if (led_state) {
+                board_rgb_set_color(BOARD_RGB_BLUE);
+            } else {
+                board_rgb_off();
+            }
+            led_state = !led_state;
+            last_blink_time = current_time;
+        }
+    }
+}
+
+void board_ble_set_message_callback(board_ble_message_cb_t callback)
+{
+    s_ble_message_callback = callback;
+}
+
+bool board_ble_is_connected(void)
+{
+    return s_ble_connected;
+}
+
+const char* board_ble_get_device_name(void)
+{
+    return BOARD_BLE_DEVICE_NAME;
+}
+
+board_ble_state_t board_ble_get_state(void)
+{
+    return s_ble_state;
+}
+
+void board_ble_start_advertising(void)
+{
+    if (s_ble_state == BOARD_BLE_STATE_INITIALIZED || s_ble_state == BOARD_BLE_STATE_ADVERTISING) {
+        ESP_LOGI(BOARD_TAG, "开始BLE广播...");
+        
+        esp_ble_adv_params_t adv_params = {
+            .adv_int_min        = 0x20,
+            .adv_int_max        = 0x40,
+            .adv_type           = ADV_TYPE_IND,
+            .own_addr_type      = BLE_ADDR_TYPE_PUBLIC,
+            .channel_map        = ADV_CHNL_ALL,
+            .adv_filter_policy  = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
+        };
+        
+        esp_err_t ret = esp_ble_gap_start_advertising(&adv_params);
+        if (ret != ESP_OK) {
+            ble_handle_error("开始广播", ret);
+        } else {
+            s_ble_state = BOARD_BLE_STATE_ADVERTISING;
+            ESP_LOGI(BOARD_TAG, "BLE广播已启动");
+        }
+    } else {
+        ESP_LOGW(BOARD_TAG, "当前状态无法开始广播: %s", board_ble_state_to_string(s_ble_state));
+    }
+}
+
+void board_ble_stop_advertising(void)
+{
+    if (s_ble_state == BOARD_BLE_STATE_ADVERTISING) {
+        ESP_LOGI(BOARD_TAG, "停止BLE广播...");
+        
+        esp_err_t ret = esp_ble_gap_stop_advertising();
+        if (ret != ESP_OK) {
+            ble_handle_error("停止广播", ret);
+        } else {
+            s_ble_state = BOARD_BLE_STATE_INITIALIZED;
+            ESP_LOGI(BOARD_TAG, "BLE广播已停止");
+        }
+    }
 }
