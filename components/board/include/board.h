@@ -1,11 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
-#include "esp_gap_ble_api.h"
-#include "esp_gatts_api.h"
-#include "esp_bt.h"
-#include "esp_bt_main.h"
-#include "esp_gatt_common_api.h"
+#include "esp_err.h"
 
 /* ================== 显示配置 ================== */
 #define BOARD_TAG "board"
@@ -52,7 +48,7 @@ typedef enum {
 } board_rgb_color_t;
 
 /* ================== 生命周期 ================== */
-void board_init(void);
+esp_err_t board_init(void);
 
 /* ================== 显示接口 ================== */
 void board_display_begin(void);
@@ -72,8 +68,8 @@ void board_notify(void);
 
 /* ================== 震动接口 ================== */
 void board_vibrate_init(void);
-void board_vibrate_on(uint32_t ms);
-void board_vibrate_off(void);
+esp_err_t board_vibrate_on(uint32_t ms);
+esp_err_t board_vibrate_off(void);
 void board_vibrate_tick(void);  // 需要在主循环中调用
 
 /* ================== RGB灯接口 ================== */
@@ -81,32 +77,3 @@ void board_rgb_init(void);
 void board_rgb_set_color(board_rgb_color_t color);
 void board_rgb_off(void);
 
-/* ================== BLE配置 ================== */
-#define BOARD_BLE_DEVICE_NAME     "BIPI_PAGER"
-#define BOARD_BLE_SERVICE_UUID    0x1234
-#define BOARD_BLE_CHAR_UUID       0x5678
-#define BOARD_BLE_MAX_MESSAGE_LEN 128
-
-/* BLE消息接收回调函数类型 */
-typedef void (*board_ble_message_cb_t)(const char* sender, const char* message);
-
-/* BLE状态枚举 */
-typedef enum {
-    BOARD_BLE_STATE_UNINITIALIZED,
-    BOARD_BLE_STATE_INITIALIZING,
-    BOARD_BLE_STATE_INITIALIZED,
-    BOARD_BLE_STATE_ADVERTISING,
-    BOARD_BLE_STATE_CONNECTED,
-    BOARD_BLE_STATE_ERROR
-} board_ble_state_t;
-
-/* ================== BLE接口 ================== */
-void board_ble_init(void);
-void board_ble_poll(void);
-void board_ble_set_message_callback(board_ble_message_cb_t callback);
-bool board_ble_is_connected(void);
-const char* board_ble_get_device_name(void);
-board_ble_state_t board_ble_get_state(void);
-const char* board_ble_state_to_string(board_ble_state_t state);
-void board_ble_start_advertising(void);
-void board_ble_stop_advertising(void);

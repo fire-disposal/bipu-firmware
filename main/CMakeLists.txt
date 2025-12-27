@@ -2,14 +2,15 @@ idf_component_register(
     SRCS
         "main.c"
         "app.c"
-        "ui.c"
-        "board.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
         u8g2
         driver
         bt
+        board
+        ble
+        ui
     PRIV_REQUIRES
         esp_timer
         freertos
