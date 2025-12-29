@@ -245,7 +245,7 @@ void board_display_end(void)
 void board_display_text(int x, int y, const char* text)
 {
     if (text) {
-        u8g2_SetFont(&s_u8g2, u8g2_font_wqy12_t_chinese3);
+        u8g2_SetFont(&s_u8g2, u8g2_font_wqy12_t_gb2312a);
         u8g2_DrawUTF8(&s_u8g2, x, y, text);
     }
 }
