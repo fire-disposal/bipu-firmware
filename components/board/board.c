@@ -137,16 +137,20 @@ static bool button_debounce(int button)
     uint32_t current_time = board_time_ms();
     bool raw_state = read_button_gpio(button);
 
+    // 状态发生变化
     if (raw_state != state->is_pressed) {
+        // 如果距离上次状态变化时间太短，忽略（去抖）
+        if (current_time - state->press_time < DEBOUNCE_TIME_MS) {
+            return false;
+        }
+        
         state->is_pressed = raw_state;
         state->press_time = current_time;
-        state->debounced = false;
-        return raw_state; // 上升沿触发
-    }
-    
-    if (!state->debounced && (current_time - state->press_time) >= DEBOUNCE_TIME_MS) {
-        state->debounced = true;
-        return state->is_pressed;
+        
+        // 只有在按下（raw_state == true）且状态稳定变化时才触发
+        if (state->is_pressed) {
+            return true;
+        }
     }
     
     return false;
@@ -177,6 +181,8 @@ static void gpio_init(void)
         .intr_type = GPIO_INTR_DISABLE,
     };
     gpio_config(&vibrate_config);
+    // 增强GPIO驱动强度（重要：确保有足够的驱动电流给马达模块）
+    gpio_set_drive_capability(BOARD_GPIO_VIBRATE, GPIO_DRIVE_CAP_3);
     
     // 配置RGB灯GPIO为输出
     gpio_config_t rgb_config = {
@@ -227,7 +233,13 @@ esp_err_t board_init(void)
         s_button_states[i].debounced = false;
     }
     
-    ESP_LOGI(BOARD_TAG, "Board initialized");
+    // 震动马达初始化
+    board_vibrate_init();
+    
+    // RGB灯初始化
+    board_rgb_init();
+    
+    ESP_LOGI(BOARD_TAG, "Board initialized successfully");
     return ESP_OK;
 }
 
@@ -290,40 +302,53 @@ void board_delay_ms(uint32_t ms)
 /* ================== 震动接口实现 ================== */
 void board_vibrate_init(void)
 {
-    // 震动马达GPIO已经在gpio_init()中初始化
+    // 确保GPIO处于正确状态（GPIO配置已在gpio_init()中完成）
     gpio_set_level(BOARD_GPIO_VIBRATE, 0);
     s_vibrate_active = false;
     s_vibrate_end_time = 0;
+    ESP_LOGI(BOARD_TAG, "Vibrate motor initialized on GPIO%d", BOARD_GPIO_VIBRATE);
 }
 
 esp_err_t board_vibrate_on(uint32_t ms)
 {
     gpio_set_level(BOARD_GPIO_VIBRATE, 1);
-    s_vibrate_active = true;
+    // 先设置end_time再激活标志，确保原子性
     if (ms > 0) {
         s_vibrate_end_time = board_time_ms() + ms;
+        s_vibrate_active = true;
     } else {
-        s_vibrate_end_time = 0; // 持续震动，需要手动关闭
+        // 持续震动：设置end_time为最大值而不是0，避免被tick立即关掉
+        s_vibrate_end_time = 0xFFFFFFFF;
+        s_vibrate_active = true;
     }
+    ESP_LOGI(BOARD_TAG, "Vibrate ON: %u ms", ms);
     return ESP_OK;
 }
 
 esp_err_t board_vibrate_off(void)
 {
-    gpio_set_level(BOARD_GPIO_VIBRATE, 0);
     s_vibrate_active = false;
     s_vibrate_end_time = 0;
+    gpio_set_level(BOARD_GPIO_VIBRATE, 0);  // 最后才关GPIO，避免中间状态问题
+    ESP_LOGI(BOARD_TAG, "Vibrate OFF");
     return ESP_OK;
 }
 
 /* ================== 震动状态管理 ================== */
 void board_vibrate_tick(void)
 {
-    if (s_vibrate_active && s_vibrate_end_time > 0) {
-        uint32_t current_time = board_time_ms();
-        if (current_time >= s_vibrate_end_time) {
-            board_vibrate_off();
-        }
+    if (!s_vibrate_active) {
+        return;  // 未激活，直接返回
+    }
+    
+    // 0xFFFFFFFF表示持续震动（手动关闭），忽略超时
+    if (s_vibrate_end_time == 0xFFFFFFFF) {
+        return;
+    }
+    
+    uint32_t current_time = board_time_ms();
+    if (current_time >= s_vibrate_end_time) {
+        board_vibrate_off();
     }
 }
 

@@ -1,4 +1,6 @@
 #include "ui.h"
+#include "ui_types.h"
+#include "ui_render.h"
 #include "board.h"
 #include "ble_manager.h"
 #include "esp_log.h"
@@ -7,17 +9,9 @@
 
 static const char* UI_TAG = "ui";
 
-#define MAX_MESSAGES 10
 #define STANDBY_TIMEOUT_MS 30000
 
 /* ================== 内部状态定义 ================== */
-
-typedef struct {
-    char sender[32];
-    char text[128];
-    uint32_t timestamp;
-    bool is_read;
-} ui_message_t;
 
 typedef struct {
     ui_state_enum_t state;
@@ -30,28 +24,6 @@ typedef struct {
 static ui_context_t s_ui;
 
 /* ================== 辅助函数 ================== */
-
-static size_t ui_get_utf8_safe_len(const char* text, size_t max_bytes)
-{
-    size_t i = 0;
-    while (text[i] != '\0' && i < max_bytes) {
-        size_t char_len = 0;
-        unsigned char c = (unsigned char)text[i];
-        
-        if (c < 0x80) char_len = 1;
-        else if ((c & 0xE0) == 0xC0) char_len = 2;
-        else if ((c & 0xF0) == 0xE0) char_len = 3;
-        else if ((c & 0xF8) == 0xF0) char_len = 4;
-        else char_len = 1; // 无效字符，按1字节处理
-        
-        if (i + char_len > max_bytes) {
-            break; // 放不下了
-        }
-        
-        i += char_len;
-    }
-    return i;
-}
 
 static void ui_update_activity(void)
 {
@@ -84,100 +56,6 @@ static void ui_add_message_internal(const char* sender, const char* text)
     s_ui.current_msg_idx = s_ui.message_count - 1;
 }
 
-/* ================== 渲染函数 ================== */
-
-static void ui_render_status_bar(void)
-{
-    // 绘制顶部状态栏背景
-    // board_display_rect(0, 0, 128, 12, true); // 如果需要反色背景
-    
-    // 绘制分割线
-    board_display_rect(0, 12, 128, 1, true);
-    
-    // 显示BLE状态
-    bool connected = ble_manager_is_connected();
-    board_display_text(2, 10, connected ? "BLE: OK" : "BLE: --");
-    
-    // 显示时间 (模拟时间，因为没有RTC，使用运行时间)
-    uint32_t seconds = board_time_ms() / 1000;
-    uint32_t minutes = seconds / 60;
-    uint32_t hours = minutes / 60;
-    char time_str[16];
-    snprintf(time_str, sizeof(time_str), "%02lu:%02lu", (hours % 24), (minutes % 60));
-    
-    // 右对齐显示时间 (假设字符宽度约6px)
-    board_display_text(90, 10, time_str);
-}
-
-static void ui_render_main(void)
-{
-    board_display_begin();
-    
-    ui_render_status_bar();
-    
-    // 显示欢迎语或大时钟
-    board_display_text(30, 35, "BIPI PAGER");
-    
-    // 显示消息计数
-    char msg_info[64];
-    if (s_ui.message_count > 0) {
-        int unread = 0;
-        for(int i=0; i<s_ui.message_count; i++) {
-            if(!s_ui.messages[i].is_read) unread++;
-        }
-        snprintf(msg_info, sizeof(msg_info), "消息: %d (未读: %d)", s_ui.message_count, unread);
-    } else {
-        snprintf(msg_info, sizeof(msg_info), "暂无消息");
-    }
-    board_display_text(10, 55, msg_info);
-    
-    board_display_end();
-}
-
-static void ui_render_message_read(void)
-{
-    if (s_ui.message_count == 0) return;
-    
-    ui_message_t* msg = &s_ui.messages[s_ui.current_msg_idx];
-    
-    board_display_begin();
-    
-    ui_render_status_bar();
-    
-    // 显示消息索引和发送者
-    char header[64];
-    snprintf(header, sizeof(header), "[%d/%d] %s", 
-             s_ui.current_msg_idx + 1, s_ui.message_count, msg->sender);
-    board_display_text(0, 25, header);
-    
-    // 显示消息内容（简单的多行显示）
-    // 这里假设每行约20个字符（中文10个）
-    char line_buf[32];
-    const char* p = msg->text;
-    int y = 38;
-    
-    while (*p && y < 64) {
-        // 计算不截断UTF-8字符的安全长度
-        size_t safe_len = ui_get_utf8_safe_len(p, 20);
-        
-        strncpy(line_buf, p, safe_len);
-        line_buf[safe_len] = '\0';
-        
-        board_display_text(2, y, line_buf);
-        y += 12;
-        
-        p += safe_len;
-    }
-    
-    // 如果未读，标记为已读
-    if (!msg->is_read) {
-        msg->is_read = true;
-        // 可以在这里发送回执等
-    }
-    
-    board_display_end();
-}
-
 /* ================== 核心接口实现 ================== */
 
 void ui_init(void)
@@ -186,6 +64,14 @@ void ui_init(void)
     // 默认启动进入主界面，而不是待机模式，这样用户能看到屏幕亮起
     s_ui.state = UI_STATE_MAIN;
     ui_update_activity();
+
+    // 添加测试消息
+    ui_add_message_internal("System", "Welcome to BiPi Pager!");
+    ui_add_message_internal("Alice", "Hello there!");
+    ui_add_message_internal("Bob", "This is a very long message to test the word wrapping functionality.");
+    ui_add_message_internal("张三", "你好，这是一条中文消息测试。");
+    ui_add_message_internal("李四", "这是一条非常长的中文消息，用来测试换行显示是否正常。");
+
     ESP_LOGI(UI_TAG, "UI组件初始化完成");
 }
 
@@ -205,13 +91,27 @@ void ui_tick(void)
             // 待机状态不刷新屏幕，保持黑屏
             break;
             
-        case UI_STATE_MAIN:
-            ui_render_main();
+        case UI_STATE_MAIN: {
+            int unread = 0;
+            for(int i=0; i<s_ui.message_count; i++) {
+                if(!s_ui.messages[i].is_read) unread++;
+            }
+            ui_render_main(s_ui.message_count, unread);
             break;
+        }
             
-        case UI_STATE_MESSAGE_READ:
-            ui_render_message_read();
+        case UI_STATE_MESSAGE_READ: {
+            if (s_ui.message_count > 0) {
+                ui_message_t* msg = &s_ui.messages[s_ui.current_msg_idx];
+                // 如果未读，标记为已读
+                if (!msg->is_read) {
+                    msg->is_read = true;
+                    // 可以在这里发送回执等
+                }
+                ui_render_message_read(msg, s_ui.current_msg_idx, s_ui.message_count);
+            }
             break;
+        }
             
         default:
             break;
@@ -283,8 +183,7 @@ void ui_enter_standby(void)
 {
     if (s_ui.state != UI_STATE_STANDBY) {
         s_ui.state = UI_STATE_STANDBY;
-        board_display_begin();
-        board_display_end(); // 清屏
+        ui_render_standby();
         board_rgb_off();
         ESP_LOGI(UI_TAG, "进入待机模式");
     }

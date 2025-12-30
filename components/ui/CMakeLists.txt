@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "ui.c"
+    SRCS "ui.c" "ui_render.c"
     INCLUDE_DIRS "include"
     REQUIRES board ble
 )
