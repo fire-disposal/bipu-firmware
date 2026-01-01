@@ -13,7 +13,7 @@ static const char* MAIN_TAG = "main";
 #define APP_TASK_PERIOD_MS       (50)       // 20Hz 刷新频率
 #define APP_TASK_NAME            "app_task"
 
-#define VIBRATE_STARTUP_MS       (200)
+#define VIBRATE_STARTUP_MS       (1000)
 #define STARTUP_RESTART_DELAY_MS (2000)
 
 /* ===================== 应用主任务 ===================== */

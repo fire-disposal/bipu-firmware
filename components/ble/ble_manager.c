@@ -1,4 +1,5 @@
 #include "ble_manager.h"
+#include "board.h"
 #include "esp_log.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
@@ -13,45 +14,36 @@ static const char* BLE_TAG = "ble_manager";
 static ble_state_t s_ble_state = BLE_STATE_UNINITIALIZED;
 static bool s_ble_connected = false;
 static ble_message_callback_t s_message_callback = NULL;
-static uint8_t s_service_handle = 0;
-static uint8_t s_char_handle = 0;
 static uint16_t s_conn_id = 0xFFFF;
 static uint32_t s_error_count = 0;
-static uint32_t s_last_error_time = 0;
 
-/* ================== BLE UUID定义 ================== */
-// 自定义服务UUID: 00001234-0000-0000-0000-000000000000
-static const uint8_t s_service_uuid_128[16] = {
-    0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-};
+// Handles
+static uint16_t s_bipupu_service_handle;
+static uint16_t s_cmd_char_handle;
+static uint16_t s_status_char_handle;
 
-// 自定义特征UUID: 00005678-0000-0000-0000-000000000000
-static const uint8_t s_char_uuid_128[16] = {
-    0x78, 0x56, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-};
+static uint16_t s_battery_service_handle;
+static uint16_t s_battery_level_char_handle;
 
-static const uint8_t s_char_value[1] = {0x00};
+// UUIDs
+static const uint8_t s_bipupu_service_uuid[16] = BIPUPU_SERVICE_UUID_128;
+static const uint8_t s_cmd_char_uuid[16] = BIPUPU_CHAR_CMD_UUID_128;
+static const uint8_t s_status_char_uuid[16] = BIPUPU_CHAR_STATUS_UUID_128;
+static const uint16_t s_battery_service_uuid = BATTERY_SERVICE_UUID;
+static const uint16_t s_battery_level_uuid = BATTERY_LEVEL_UUID;
 
-static esp_attr_value_t s_char_attr_value = {
-    .attr_max_len = BLE_MAX_MESSAGE_LEN,
-    .attr_len = sizeof(s_char_value),
-    .attr_value = (uint8_t*)s_char_value,
-};
+// Battery Level
+static uint8_t s_battery_level = 100;
 
-/* ================== 错误处理 ================== */
+/* ================== 辅助函数 ================== */
 static void ble_handle_error(const char* operation, esp_err_t error)
 {
     s_error_count++;
-    s_last_error_time = esp_log_timestamp();
     s_ble_state = BLE_STATE_ERROR;
-    
     ESP_LOGE(BLE_TAG, "BLE错误 - 操作: %s, 错误码: %s (0x%x)",
              operation, esp_err_to_name(error), error);
 }
 
-/* ================== 状态字符串转换 ================== */
 const char* ble_manager_state_to_string(ble_state_t state)
 {
     switch (state) {
@@ -65,132 +57,256 @@ const char* ble_manager_state_to_string(ble_state_t state)
     }
 }
 
+/* ================== 协议处理 ================== */
+static uint8_t calculate_checksum(const uint8_t *data, size_t len) {
+    uint8_t sum = 0;
+    for (size_t i = 0; i < len; i++) {
+        sum += data[i];
+    }
+    return sum;
+}
+
+static void process_packet(const uint8_t *data, uint16_t len) {
+    if (len < 9) { // Min length check (Header + 1 color + Vib + TextLen + Checksum)
+        ESP_LOGW(BLE_TAG, "Packet too short: %d", len);
+        return;
+    }
+
+    // 1. Checksum Validation
+    uint8_t received_checksum = data[len - 1];
+    uint8_t calculated_checksum = calculate_checksum(data, len - 1);
+    if (received_checksum != calculated_checksum) {
+        ESP_LOGE(BLE_TAG, "Checksum failed: Recv 0x%02X, Calc 0x%02X", received_checksum, calculated_checksum);
+        return;
+    }
+
+    // 2. Protocol Version
+    if (data[0] != PROTOCOL_VERSION) {
+        ESP_LOGE(BLE_TAG, "Invalid Protocol Version: 0x%02X", data[0]);
+        return;
+    }
+
+    // 3. Command Type
+    if (data[1] != CMD_TYPE_MESSAGE) {
+        ESP_LOGW(BLE_TAG, "Unsupported Command Type: 0x%02X", data[1]);
+        return;
+    }
+
+    // Offset tracking
+    size_t offset = 4; // Skip Ver, Type, Seq(2)
+
+    // 4. Colors
+    uint8_t color_count = data[offset++];
+    if (offset + color_count * 3 > len) return;
+
+    // Process first color for now (Simple implementation)
+    if (color_count > 0) {
+        uint8_t r = data[offset];
+        uint8_t g = data[offset + 1];
+        uint8_t b = data[offset + 2];
+        
+        // Map RGB to board colors
+        board_rgb_color_t color = BOARD_RGB_OFF;
+        if (r > 127 && g > 127 && b > 127) color = BOARD_RGB_WHITE;
+        else if (r > 127 && g > 127) color = BOARD_RGB_YELLOW;
+        else if (r > 127 && b > 127) color = BOARD_RGB_MAGENTA;
+        else if (g > 127 && b > 127) color = BOARD_RGB_CYAN;
+        else if (r > 127) color = BOARD_RGB_RED;
+        else if (g > 127) color = BOARD_RGB_GREEN;
+        else if (b > 127) color = BOARD_RGB_BLUE;
+        
+        board_rgb_set_color(color);
+    }
+    offset += color_count * 3;
+
+    // 5. Vibration
+    if (offset + 2 > len) return;
+    uint8_t vib_mode = data[offset++];
+    uint8_t vib_strength = data[offset++]; // Ignored for now
+    (void)vib_strength;
+
+    if (vib_mode != 0) {
+        board_vibrate_on(500); // Default 500ms for now, or map modes
+    }
+
+    // 6. Text
+    if (offset + 1 > len) return;
+    uint8_t text_len = data[offset++];
+    if (offset + text_len > len) return;
+
+    char text_buf[65];
+    if (text_len > 64) text_len = 64;
+    memcpy(text_buf, &data[offset], text_len);
+    text_buf[text_len] = '\0';
+    offset += text_len;
+
+    ESP_LOGI(BLE_TAG, "Received Message: %s", text_buf);
+    
+    // Notify App/UI
+    if (s_message_callback) {
+        s_message_callback("App", text_buf);
+    }
+
+    // 7. Screen Effect
+    if (offset + 1 > len) return;
+    uint8_t screen_effect = data[offset++];
+    (void)screen_effect; // TODO: Implement screen effects
+}
+
 /* ================== BLE事件处理回调 ================== */
 static void ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, 
                                      esp_ble_gatts_cb_param_t *param)
 {
+    esp_err_t ret;
     switch (event) {
         case ESP_GATTS_REG_EVT:
-            ESP_LOGI(BLE_TAG, "GATT注册事件, app_id %d, status %d", 
-                     param->reg.app_id, param->reg.status);
             if (param->reg.status == ESP_GATT_OK) {
-                s_service_handle = gatts_if;
                 s_ble_state = BLE_STATE_INITIALIZED;
                 
-                // 创建GATT服务
-                esp_gatt_srvc_id_t service_id;
-                service_id.is_primary = true;
-                service_id.id.inst_id = 0;
-                service_id.id.uuid.len = ESP_UUID_LEN_128;
-                memcpy(service_id.id.uuid.uuid.uuid128, s_service_uuid_128, ESP_UUID_LEN_128);
+                // 1. Create Bipupu Service
+                esp_gatt_srvc_id_t bipupu_service_id;
+                bipupu_service_id.is_primary = true;
+                bipupu_service_id.id.inst_id = 0;
+                bipupu_service_id.id.uuid.len = ESP_UUID_LEN_128;
+                memcpy(bipupu_service_id.id.uuid.uuid.uuid128, s_bipupu_service_uuid, ESP_UUID_LEN_128);
                 
-                esp_err_t ret = esp_ble_gatts_create_service(gatts_if, &service_id, 4);
-                if (ret != ESP_OK) {
-                    ble_handle_error("创建GATT服务", ret);
-                }
+                ret = esp_ble_gatts_create_service(gatts_if, &bipupu_service_id, 6); // Handles: Svc + Cmd + Status + 2*Desc
+                if (ret != ESP_OK) ble_handle_error("Create Bipupu Service", ret);
+
+                // 2. Create Battery Service
+                esp_gatt_srvc_id_t battery_service_id;
+                battery_service_id.is_primary = true;
+                battery_service_id.id.inst_id = 1;
+                battery_service_id.id.uuid.len = ESP_UUID_LEN_16;
+                battery_service_id.id.uuid.uuid.uuid16 = s_battery_service_uuid;
+
+                ret = esp_ble_gatts_create_service(gatts_if, &battery_service_id, 4);
+                if (ret != ESP_OK) ble_handle_error("Create Battery Service", ret);
+
             } else {
-                ble_handle_error("GATT注册", ESP_FAIL);
+                ble_handle_error("GATT Register", ESP_FAIL);
             }
             break;
 
         case ESP_GATTS_CREATE_EVT:
-            ESP_LOGI(BLE_TAG, "GATT服务创建事件, status %d", param->create.status);
             if (param->create.status == ESP_GATT_OK) {
-                s_service_handle = param->create.service_handle;
-                s_ble_state = BLE_STATE_ADVERTISING;
-                
-                // 启动GATT服务
-                esp_err_t ret = esp_ble_gatts_start_service(param->create.service_handle);
-                if (ret != ESP_OK) {
-                    ble_handle_error("启动GATT服务", ret);
-                    break;
+                if (param->create.service_id.id.inst_id == 0) { // Bipupu Service
+                    s_bipupu_service_handle = param->create.service_handle;
+                    esp_ble_gatts_start_service(s_bipupu_service_handle);
+
+                    // Add Command Input
+                    esp_bt_uuid_t cmd_uuid;
+                    cmd_uuid.len = ESP_UUID_LEN_128;
+                    memcpy(cmd_uuid.uuid.uuid128, s_cmd_char_uuid, ESP_UUID_LEN_128);
+                    
+                    esp_attr_value_t cmd_val = { .attr_max_len = BLE_MAX_MESSAGE_LEN, .attr_len = 0, .attr_value = NULL };
+                    esp_ble_gatts_add_char(s_bipupu_service_handle, &cmd_uuid,
+                                         ESP_GATT_PERM_WRITE,
+                                         ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR,
+                                         &cmd_val, NULL);
+
+                    // Add Status Output
+                    esp_bt_uuid_t status_uuid;
+                    status_uuid.len = ESP_UUID_LEN_128;
+                    memcpy(status_uuid.uuid.uuid128, s_status_char_uuid, ESP_UUID_LEN_128);
+                    
+                    esp_attr_value_t status_val = { .attr_max_len = 32, .attr_len = 0, .attr_value = NULL };
+                    esp_ble_gatts_add_char(s_bipupu_service_handle, &status_uuid,
+                                         ESP_GATT_PERM_READ,
+                                         ESP_GATT_CHAR_PROP_BIT_NOTIFY,
+                                         &status_val, NULL);
+
+                } else if (param->create.service_id.id.inst_id == 1) { // Battery Service
+                    s_battery_service_handle = param->create.service_handle;
+                    esp_ble_gatts_start_service(s_battery_service_handle);
+
+                    // Add Battery Level
+                    esp_bt_uuid_t bat_uuid;
+                    bat_uuid.len = ESP_UUID_LEN_16;
+                    bat_uuid.uuid.uuid16 = s_battery_level_uuid;
+
+                    esp_attr_value_t bat_val = { .attr_max_len = 1, .attr_len = 1, .attr_value = &s_battery_level };
+                    esp_ble_gatts_add_char(s_battery_service_handle, &bat_uuid,
+                                         ESP_GATT_PERM_READ,
+                                         ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
+                                         &bat_val, NULL);
                 }
-                
-                // 添加特征
-                esp_bt_uuid_t char_uuid;
-                char_uuid.len = ESP_UUID_LEN_128;
-                memcpy(char_uuid.uuid.uuid128, s_char_uuid_128, ESP_UUID_LEN_128);
-                
-                ret = esp_ble_gatts_add_char(param->create.service_handle,
-                                           &char_uuid,
-                                           ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-                                           ESP_GATT_CHAR_PROP_BIT_READ | 
-                                           ESP_GATT_CHAR_PROP_BIT_WRITE | 
-                                           ESP_GATT_CHAR_PROP_BIT_NOTIFY,
-                                           &s_char_attr_value, NULL);
-                if (ret != ESP_OK) {
-                    ble_handle_error("添加GATT特征", ret);
-                }
-            } else {
-                ble_handle_error("创建GATT服务", ESP_FAIL);
             }
             break;
 
         case ESP_GATTS_ADD_CHAR_EVT:
-            ESP_LOGI(BLE_TAG, "GATT特征添加事件, status %d, attr_handle %d",
-                    param->add_char.status, param->add_char.attr_handle);
             if (param->add_char.status == ESP_GATT_OK) {
-                s_char_handle = param->add_char.attr_handle;
-            } else {
-                ble_handle_error("添加GATT特征", ESP_FAIL);
+                if (param->add_char.char_uuid.len == ESP_UUID_LEN_128) {
+                    if (memcmp(param->add_char.char_uuid.uuid.uuid128, s_cmd_char_uuid, 16) == 0) {
+                        s_cmd_char_handle = param->add_char.attr_handle;
+                    } else if (memcmp(param->add_char.char_uuid.uuid.uuid128, s_status_char_uuid, 16) == 0) {
+                        s_status_char_handle = param->add_char.attr_handle;
+                        // Add CCCD for Notify
+                        esp_bt_uuid_t cccd_uuid = { .len = ESP_UUID_LEN_16, .uuid = { .uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG } };
+                        esp_attr_value_t cccd_val = { .attr_max_len = 2, .attr_len = 2, .attr_value = (uint8_t[]){0x00, 0x00} };
+                        esp_ble_gatts_add_char_descr(s_bipupu_service_handle, &cccd_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE, &cccd_val, NULL);
+                    }
+                } else if (param->add_char.char_uuid.len == ESP_UUID_LEN_16) {
+                    if (param->add_char.char_uuid.uuid.uuid16 == s_battery_level_uuid) {
+                        s_battery_level_char_handle = param->add_char.attr_handle;
+                        // Add CCCD for Notify
+                        esp_bt_uuid_t cccd_uuid = { .len = ESP_UUID_LEN_16, .uuid = { .uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG } };
+                        esp_attr_value_t cccd_val = { .attr_max_len = 2, .attr_len = 2, .attr_value = (uint8_t[]){0x00, 0x00} };
+                        esp_ble_gatts_add_char_descr(s_battery_service_handle, &cccd_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE, &cccd_val, NULL);
+                    }
+                }
             }
             break;
 
         case ESP_GATTS_START_EVT:
-            ESP_LOGI(BLE_TAG, "GATT服务启动事件, status %d", param->start.status);
-            if (param->start.status == ESP_GATT_OK) {
-                ESP_LOGI(BLE_TAG, "BLE服务已启动，准备开始广播...");
-                // 自动启动广告
-                esp_err_t ret = ble_manager_start_advertising();
-                if (ret != ESP_OK) {
-                    ble_handle_error("启动广告失败", ret);
-                }
-            } else {
-                ble_handle_error("启动GATT服务", ESP_FAIL);
+            if (param->start.status == ESP_GATT_OK && param->start.service_handle == s_bipupu_service_handle) {
+                ble_manager_start_advertising();
             }
             break;
 
         case ESP_GATTS_CONNECT_EVT:
-            ESP_LOGI(BLE_TAG, "BLE连接事件, conn_id %d", param->connect.conn_id);
             s_ble_connected = true;
             s_conn_id = param->connect.conn_id;
             s_ble_state = BLE_STATE_CONNECTED;
-            ESP_LOGI(BLE_TAG, "BLE已连接，设备名称: %s", BLE_DEVICE_NAME);
+            // Update connection params if needed
+            esp_ble_conn_update_params_t conn_params = {0};
+            memcpy(conn_params.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
+            conn_params.min_int = 0x10; // 20ms
+            conn_params.max_int = 0x20; // 40ms
+            conn_params.latency = 0;
+            conn_params.timeout = 400;
+            esp_ble_gap_update_conn_params(&conn_params);
             break;
 
         case ESP_GATTS_DISCONNECT_EVT:
-            ESP_LOGI(BLE_TAG, "BLE断开连接事件, conn_id %d", param->disconnect.conn_id);
             s_ble_connected = false;
             s_conn_id = 0xFFFF;
             s_ble_state = BLE_STATE_ADVERTISING;
-            ESP_LOGI(BLE_TAG, "BLE已断开，重新广播中...");
+            esp_ble_gap_start_advertising(NULL); // Restart advertising
             break;
 
         case ESP_GATTS_WRITE_EVT:
-            ESP_LOGI(BLE_TAG, "GATT写事件, conn_id %d, handle %d, len %d",
-                    param->write.conn_id, param->write.handle, param->write.len);
-            
-            if (param->write.handle == s_char_handle && param->write.len > 0) {
-                // 解析接收到的消息格式：sender|message
-                char received_data[BLE_MAX_MESSAGE_LEN + 1] = {0};
-                memcpy(received_data, param->write.value, 
-                       (param->write.len < BLE_MAX_MESSAGE_LEN) ? param->write.len : BLE_MAX_MESSAGE_LEN);
-                received_data[param->write.len] = '\0';
-                
-                ESP_LOGI(BLE_TAG, "接收到BLE消息: %s", received_data);
-                
-                // 解析消息格式
-                char* separator = strchr(received_data, '|');
-                if (separator != NULL) {
-                    *separator = '\0';
-                    char* sender = received_data;
-                    char* message = separator + 1;
-                    
-                    // 调用消息回调函数
-                    if (s_message_callback != NULL) {
-                        s_message_callback(sender, message);
-                    }
+            if (param->write.handle == s_cmd_char_handle) {
+                process_packet(param->write.value, param->write.len);
+                if (param->write.need_rsp) {
+                    esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
                 }
+            } else {
+                // Handle CCCD writes
+                if (param->write.need_rsp) {
+                    esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
+                }
+            }
+            break;
+            
+        case ESP_GATTS_READ_EVT:
+            if (param->read.handle == s_battery_level_char_handle) {
+                esp_gatt_rsp_t rsp;
+                memset(&rsp, 0, sizeof(esp_gatt_rsp_t));
+                rsp.attr_value.handle = param->read.handle;
+                rsp.attr_value.len = 1;
+                rsp.attr_value.value[0] = s_battery_level;
+                esp_ble_gatts_send_response(gatts_if, param->read.conn_id, param->read.trans_id, ESP_GATT_OK, &rsp);
             }
             break;
 
@@ -203,68 +319,34 @@ static void ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t ga
 
 esp_err_t ble_manager_init(void)
 {
-    if (s_ble_state != BLE_STATE_UNINITIALIZED) {
-        ESP_LOGW(BLE_TAG, "BLE已经初始化，当前状态: %s", 
-                 ble_manager_state_to_string(s_ble_state));
-        return ESP_OK;
-    }
+    if (s_ble_state != BLE_STATE_UNINITIALIZED) return ESP_OK;
     
-    ESP_LOGI(BLE_TAG, "初始化BLE管理器...");
     s_ble_state = BLE_STATE_INITIALIZING;
+    esp_err_t ret;
     
-    esp_err_t ret = ESP_OK;
-    
-    // 1. 初始化蓝牙控制器
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ret = esp_bt_controller_init(&bt_cfg);
-    if (ret != ESP_OK) {
-        ble_handle_error("蓝牙控制器初始化", ret);
-        return ret;
-    }
+    if (ret) return ret;
     
-    // 2. 使能蓝牙控制器
     ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
-    if (ret != ESP_OK) {
-        ble_handle_error("蓝牙控制器使能", ret);
-        return ret;
-    }
+    if (ret) return ret;
     
-    // 3. 初始化蓝牙协议栈
     ret = esp_bluedroid_init();
-    if (ret != ESP_OK) {
-        ble_handle_error("蓝牙协议栈初始化", ret);
-        return ret;
-    }
+    if (ret) return ret;
     
-    // 4. 使能蓝牙协议栈
     ret = esp_bluedroid_enable();
-    if (ret != ESP_OK) {
-        ble_handle_error("蓝牙协议栈使能", ret);
-        return ret;
-    }
+    if (ret) return ret;
     
-    // 5. 注册GATT回调函数
     ret = esp_ble_gatts_register_callback(ble_gatts_event_handler);
-    if (ret != ESP_OK) {
-        ble_handle_error("GATT回调注册", ret);
-        return ret;
-    }
+    if (ret) return ret;
     
-    // 6. 注册GATT应用
     ret = esp_ble_gatts_app_register(0);
-    if (ret != ESP_OK) {
-        ble_handle_error("GATT应用注册", ret);
-        return ret;
-    }
+    if (ret) return ret;
     
-    // 7. 设置设备名称
     ret = esp_ble_gap_set_device_name(BLE_DEVICE_NAME);
-    if (ret != ESP_OK) {
-        ble_handle_error("设置设备名称", ret);
-        return ret;
-    }
+    if (ret) return ret;
     
-    // 8. 配置广播数据
+    // Config Advertising Data
     esp_ble_adv_data_t adv_data = {
         .set_scan_rsp = false,
         .include_name = true,
@@ -277,113 +359,46 @@ esp_err_t ble_manager_init(void)
         .service_data_len = 0,
         .p_service_data = NULL,
         .service_uuid_len = ESP_UUID_LEN_128,
-        .p_service_uuid = (uint8_t*)s_service_uuid_128,
+        .p_service_uuid = (uint8_t*)s_bipupu_service_uuid,
         .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
     };
+    esp_ble_gap_config_adv_data(&adv_data);
     
-    ret = esp_ble_gap_config_adv_data(&adv_data);
-    if (ret != ESP_OK) {
-        ble_handle_error("配置广播数据", ret);
-        return ret;
-    }
-    
-    ESP_LOGI(BLE_TAG, "BLE初始化完成");
     return ESP_OK;
 }
 
 esp_err_t ble_manager_deinit(void)
 {
-    ESP_LOGI(BLE_TAG, "反初始化BLE管理器...");
-    
-    esp_err_t ret = esp_ble_gap_stop_advertising();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ble_handle_error("停止广告", ret);
-    }
-    
-    ret = esp_bluedroid_disable();
-    if (ret != ESP_OK) {
-        ble_handle_error("蓝牙协议栈禁用", ret);
-    }
-    
-    ret = esp_bluedroid_deinit();
-    if (ret != ESP_OK) {
-        ble_handle_error("蓝牙协议栈反初始化", ret);
-    }
-    
-    ret = esp_bt_controller_disable();
-    if (ret != ESP_OK) {
-        ble_handle_error("蓝牙控制器禁用", ret);
-    }
-    
-    ret = esp_bt_controller_deinit();
-    if (ret != ESP_OK) {
-        ble_handle_error("蓝牙控制器反初始化", ret);
-        return ret;
-    }
-    
+    // Simplified deinit
+    esp_bluedroid_disable();
+    esp_bluedroid_deinit();
+    esp_bt_controller_disable();
+    esp_bt_controller_deinit();
     s_ble_state = BLE_STATE_UNINITIALIZED;
-    s_ble_connected = false;
-    
-    ESP_LOGI(BLE_TAG, "BLE反初始化完成");
     return ESP_OK;
 }
 
 esp_err_t ble_manager_start_advertising(void)
 {
-    if (s_ble_state == BLE_STATE_INITIALIZED || s_ble_state == BLE_STATE_ADVERTISING) {
-        ESP_LOGI(BLE_TAG, "开始BLE广播...");
-        
-        esp_ble_adv_params_t adv_params = {
-            .adv_int_min = BLE_ADV_INTERVAL_MIN,
-            .adv_int_max = BLE_ADV_INTERVAL_MAX,
-            .adv_type = ADV_TYPE_IND,
-            .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
-            .channel_map = ADV_CHNL_ALL,
-            .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
-        };
-        
-        esp_err_t ret = esp_ble_gap_start_advertising(&adv_params);
-        if (ret != ESP_OK) {
-            ble_handle_error("开始广播", ret);
-            return ret;
-        }
-        
-        s_ble_state = BLE_STATE_ADVERTISING;
-        ESP_LOGI(BLE_TAG, "BLE广播已启动");
-        return ESP_OK;
-    } else {
-        ESP_LOGW(BLE_TAG, "当前状态无法开始广播: %s", 
-                 ble_manager_state_to_string(s_ble_state));
-        return ESP_ERR_INVALID_STATE;
-    }
+    esp_ble_adv_params_t adv_params = {
+        .adv_int_min = BLE_ADV_INTERVAL_MIN,
+        .adv_int_max = BLE_ADV_INTERVAL_MAX,
+        .adv_type = ADV_TYPE_IND,
+        .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
+        .channel_map = ADV_CHNL_ALL,
+        .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
+    };
+    return esp_ble_gap_start_advertising(&adv_params);
 }
 
 esp_err_t ble_manager_stop_advertising(void)
 {
-    if (s_ble_state == BLE_STATE_ADVERTISING) {
-        ESP_LOGI(BLE_TAG, "停止BLE广播...");
-        
-        esp_err_t ret = esp_ble_gap_stop_advertising();
-        if (ret != ESP_OK) {
-            ble_handle_error("停止广播", ret);
-            return ret;
-        }
-        
-        s_ble_state = BLE_STATE_INITIALIZED;
-        ESP_LOGI(BLE_TAG, "BLE广播已停止");
-        return ESP_OK;
-    }
-    return ESP_OK;
+    return esp_ble_gap_stop_advertising();
 }
 
 void ble_manager_set_message_callback(ble_message_callback_t callback)
 {
     s_message_callback = callback;
-    if (callback == NULL) {
-        ESP_LOGI(BLE_TAG, "消息回调已取消");
-    } else {
-        ESP_LOGI(BLE_TAG, "消息回调已设置");
-    }
 }
 
 bool ble_manager_is_connected(void)
@@ -408,6 +423,14 @@ uint32_t ble_manager_get_error_count(void)
 
 void ble_manager_poll(void)
 {
-    // BLE事件通过回调函数处理，这里预留用于未来扩展
-    // 可以在这里添加状态检查或心跳功能
+}
+
+void ble_manager_update_battery_level(uint8_t level)
+{
+    if (level > 100) level = 100;
+    s_battery_level = level;
+    
+    if (s_ble_connected && s_battery_level_char_handle != 0) {
+        esp_ble_gatts_send_indicate(s_bipupu_service_handle, s_conn_id, s_battery_level_char_handle, 1, &s_battery_level, false);
+    }
 }

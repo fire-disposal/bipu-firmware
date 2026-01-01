@@ -30,13 +30,7 @@ esp_err_t app_init(void)
     
     esp_err_t ret = ESP_OK;
     
-    // 初始化震动马达
-    board_vibrate_init();
-    ESP_LOGD(APP_TAG, "震动马达初始化成功");
-    
-    // 初始化 RGB 灯
-    board_rgb_init();
-    ESP_LOGD(APP_TAG, "RGB 灯初始化成功");
+    // 震动马达和RGB灯已在 board_init() 中初始化，此处不再重复初始化
     
     // 初始化 BLE（包括控制器、栈和广告）
     ret = ble_manager_init();
@@ -85,6 +79,14 @@ void app_loop(void)
     
     // BLE 轮询（处理 BLE 事件）
     ble_manager_poll();
+
+    // 模拟电池电量更新 (每60秒)
+    static uint32_t last_battery_update = 0;
+    if (board_time_ms() - last_battery_update > 60000) {
+        last_battery_update = board_time_ms();
+        // TODO: 读取实际电池电压
+        ble_manager_update_battery_level(85); 
+    }
 
     // BLE 连接状态指示（蓝灯闪烁）
     static bool last_connected_state = false;
