@@ -44,7 +44,14 @@ typedef enum {
 } ble_state_t;
 
 /* BLE消息接收回调函数类型 */
-typedef void (*ble_message_callback_t)(const char* sender, const char* message);
+typedef struct {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+    uint32_t duration_ms;
+} ble_effect_t;
+
+typedef void (*ble_message_callback_t)(const char* sender, const char* message, const ble_effect_t* effect);
 
 /* ================== BLE管理接口 ================== */
 

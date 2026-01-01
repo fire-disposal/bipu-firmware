@@ -397,52 +397,16 @@ void board_rgb_init(void)
 {
     // RGB灯GPIO已经在gpio_init()中初始化
     board_rgb_off();
+    ESP_LOGI(BOARD_TAG, "RGB LED initialized (GPIO)");
 }
 
-void board_rgb_set_color(board_rgb_color_t color)
+void board_rgb_set(board_rgb_t color)
 {
-    switch (color) {
-        case BOARD_RGB_OFF:
-            gpio_set_level(BOARD_GPIO_RGB_R, 0);
-            gpio_set_level(BOARD_GPIO_RGB_G, 0);
-            gpio_set_level(BOARD_GPIO_RGB_B, 0);
-            break;
-        case BOARD_RGB_RED:
-            gpio_set_level(BOARD_GPIO_RGB_R, 1);
-            gpio_set_level(BOARD_GPIO_RGB_G, 0);
-            gpio_set_level(BOARD_GPIO_RGB_B, 0);
-            break;
-        case BOARD_RGB_GREEN:
-            gpio_set_level(BOARD_GPIO_RGB_R, 0);
-            gpio_set_level(BOARD_GPIO_RGB_G, 1);
-            gpio_set_level(BOARD_GPIO_RGB_B, 0);
-            break;
-        case BOARD_RGB_BLUE:
-            gpio_set_level(BOARD_GPIO_RGB_R, 0);
-            gpio_set_level(BOARD_GPIO_RGB_G, 0);
-            gpio_set_level(BOARD_GPIO_RGB_B, 1);
-            break;
-        case BOARD_RGB_YELLOW:
-            gpio_set_level(BOARD_GPIO_RGB_R, 1);
-            gpio_set_level(BOARD_GPIO_RGB_G, 1);
-            gpio_set_level(BOARD_GPIO_RGB_B, 0);
-            break;
-        case BOARD_RGB_CYAN:
-            gpio_set_level(BOARD_GPIO_RGB_R, 0);
-            gpio_set_level(BOARD_GPIO_RGB_G, 1);
-            gpio_set_level(BOARD_GPIO_RGB_B, 1);
-            break;
-        case BOARD_RGB_MAGENTA:
-            gpio_set_level(BOARD_GPIO_RGB_R, 1);
-            gpio_set_level(BOARD_GPIO_RGB_G, 0);
-            gpio_set_level(BOARD_GPIO_RGB_B, 1);
-            break;
-        case BOARD_RGB_WHITE:
-            gpio_set_level(BOARD_GPIO_RGB_R, 1);
-            gpio_set_level(BOARD_GPIO_RGB_G, 1);
-            gpio_set_level(BOARD_GPIO_RGB_B, 1);
-            break;
-    }
+    // 简单的阈值判断，模拟 PWM 到 GPIO 高低电平
+    // 大于 127 视为高电平（亮），否则为低电平（灭）
+    gpio_set_level(BOARD_GPIO_RGB_R, color.r > 127 ? 1 : 0);
+    gpio_set_level(BOARD_GPIO_RGB_G, color.g > 127 ? 1 : 0);
+    gpio_set_level(BOARD_GPIO_RGB_B, color.b > 127 ? 1 : 0);
 }
 
 void board_rgb_off(void)
@@ -455,10 +419,9 @@ void board_rgb_off(void)
 /* ================== 反馈接口实现 ================== */
 void board_notify(void)
 {
-    // 震动提醒 + RGB灯闪烁（非阻塞方式）
+    // 震动提醒 (RGB灯由调用者管理，避免覆盖自定义光效)
     board_vibrate_on(100); // 震动100ms
-    board_rgb_set_color(BOARD_RGB_BLUE);
-    // RGB灯状态由调用者管理，这里不自动关闭
+    // board_rgb_set(BOARD_COLOR_BLUE); // 已移除，防止覆盖消息光效
     ESP_LOGI(BOARD_TAG, "Notification triggered");
 }
 

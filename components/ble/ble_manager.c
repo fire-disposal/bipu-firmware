@@ -96,26 +96,17 @@ static void process_packet(const uint8_t *data, uint16_t len) {
     size_t offset = 4; // Skip Ver, Type, Seq(2)
 
     // 4. Colors
+    ble_effect_t effect = {0};
     uint8_t color_count = data[offset++];
     if (offset + color_count * 3 > len) return;
 
     // Process first color for now (Simple implementation)
     if (color_count > 0) {
-        uint8_t r = data[offset];
-        uint8_t g = data[offset + 1];
-        uint8_t b = data[offset + 2];
-        
-        // Map RGB to board colors
-        board_rgb_color_t color = BOARD_RGB_OFF;
-        if (r > 127 && g > 127 && b > 127) color = BOARD_RGB_WHITE;
-        else if (r > 127 && g > 127) color = BOARD_RGB_YELLOW;
-        else if (r > 127 && b > 127) color = BOARD_RGB_MAGENTA;
-        else if (g > 127 && b > 127) color = BOARD_RGB_CYAN;
-        else if (r > 127) color = BOARD_RGB_RED;
-        else if (g > 127) color = BOARD_RGB_GREEN;
-        else if (b > 127) color = BOARD_RGB_BLUE;
-        
-        board_rgb_set_color(color);
+        effect.r = data[offset];
+        effect.g = data[offset + 1];
+        effect.b = data[offset + 2];
+        effect.duration_ms = 3000; // 默认光效持续 3 秒
+        ESP_LOGD(BLE_TAG, "Parsed Color: R=%d, G=%d, B=%d", effect.r, effect.g, effect.b);
     }
     offset += color_count * 3;
 
@@ -144,7 +135,7 @@ static void process_packet(const uint8_t *data, uint16_t len) {
     
     // Notify App/UI
     if (s_message_callback) {
-        s_message_callback("App", text_buf);
+        s_message_callback("App", text_buf, &effect);
     }
 
     // 7. Screen Effect

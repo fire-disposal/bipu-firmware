@@ -10,7 +10,9 @@
 static const char* APP_TAG = "app";
 
 /* ===================== BLE 消息接收回调 ===================== */
-static void ble_message_received(const char* sender, const char* message)
+static uint32_t s_message_effect_end_time = 0;
+
+static void ble_message_received(const char* sender, const char* message, const ble_effect_t* effect)
 {
     if (!sender || !message) {
         ESP_LOGW(APP_TAG, "BLE 回调接收到无效参数");
@@ -18,6 +20,21 @@ static void ble_message_received(const char* sender, const char* message)
     }
     
     ESP_LOGI(APP_TAG, "BLE 消息已接收 - 发送者: %s, 内容: %s", sender, message);
+    
+    // 处理光效
+    if (effect && effect->duration_ms > 0) {
+        ESP_LOGI(APP_TAG, "消息附带光效: R=%d, G=%d, B=%d, 持续=%dms", 
+                 effect->r, effect->g, effect->b, effect->duration_ms);
+
+        // 直接使用 RGB 值，不再进行颜色映射
+        board_rgb_t color = { .r = effect->r, .g = effect->g, .b = effect->b };
+        
+        // 只有当颜色不全为0时才设置
+        if (color.r != 0 || color.g != 0 || color.b != 0) {
+            board_rgb_set(color);
+            s_message_effect_end_time = board_time_ms() + effect->duration_ms;
+        }
+    }
     
     // 调用 UI 层显示消息
     ui_show_message(sender, message);
@@ -90,25 +107,44 @@ void app_loop(void)
 
     // BLE 连接状态指示（蓝灯闪烁）
     static bool last_connected_state = false;
+    static uint32_t connection_start_time = 0;
     bool current_connected_state = ble_manager_is_connected();
     
-    if (current_connected_state) {
-        static uint32_t last_blink_time = 0;
-        uint32_t current_time = board_time_ms();
+    // 如果正在播放消息光效，跳过连接状态指示
+    if (board_time_ms() < s_message_effect_end_time) {
+        // Do nothing, let the effect play
+    } else {
+        // 消息光效结束，恢复正常状态
         
-        if (current_time - last_blink_time > 1000) { // 每秒闪烁一次
-            static bool led_state = false;
-            if (led_state) {
-                board_rgb_set_color(BOARD_RGB_BLUE);
+        if (current_connected_state) {
+            if (!last_connected_state) {
+                // 刚连接上，记录时间
+                connection_start_time = board_time_ms();
+            }
+            
+            // 连接成功后只闪烁 3 秒
+            if (board_time_ms() - connection_start_time < 3000) {
+                static uint32_t last_blink_time = 0;
+                uint32_t current_time = board_time_ms();
+                
+                if (current_time - last_blink_time > 200) { // 加快闪烁频率 (5Hz)
+                    static bool led_state = false;
+                    if (led_state) {
+                        board_rgb_set(BOARD_COLOR_BLUE);
+                    } else {
+                        board_rgb_off();
+                    }
+                    led_state = !led_state;
+                    last_blink_time = current_time;
+                }
             } else {
+                // 连接稳定后，关闭灯光
                 board_rgb_off();
             }
-            led_state = !led_state;
-            last_blink_time = current_time;
+        } else if (last_connected_state) {
+            // 刚断开连接，关闭 RGB 灯
+            board_rgb_off();
         }
-    } else if (last_connected_state) {
-        // 刚断开连接，关闭 RGB 灯
-        board_rgb_off();
     }
     last_connected_state = current_connected_state;
 }

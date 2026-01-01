@@ -36,16 +36,24 @@ typedef enum {
 } board_key_t;
 
 /* RGB颜色定义 */
-typedef enum {
-    BOARD_RGB_OFF = 0,
-    BOARD_RGB_RED,
-    BOARD_RGB_GREEN,
-    BOARD_RGB_BLUE,
-    BOARD_RGB_YELLOW,  // RED + GREEN
-    BOARD_RGB_CYAN,    // GREEN + BLUE
-    BOARD_RGB_MAGENTA, // RED + BLUE
-    BOARD_RGB_WHITE,   // RED + GREEN + BLUE
-} board_rgb_color_t;
+typedef struct {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+} board_rgb_t;
+
+// 预定义颜色宏
+#define BOARD_COLOR_OFF     ((board_rgb_t){0, 0, 0})
+#define BOARD_COLOR_RED     ((board_rgb_t){255, 0, 0})
+#define BOARD_COLOR_GREEN   ((board_rgb_t){0, 255, 0})
+#define BOARD_COLOR_BLUE    ((board_rgb_t){0, 0, 255})
+#define BOARD_COLOR_YELLOW  ((board_rgb_t){255, 255, 0})
+#define BOARD_COLOR_CYAN    ((board_rgb_t){0, 255, 255})
+#define BOARD_COLOR_MAGENTA ((board_rgb_t){255, 0, 255})
+#define BOARD_COLOR_WHITE   ((board_rgb_t){255, 255, 255})
+#define BOARD_COLOR_ORANGE  ((board_rgb_t){255, 165, 0})
+#define BOARD_COLOR_PURPLE  ((board_rgb_t){128, 0, 128})
+#define BOARD_COLOR_PINK    ((board_rgb_t){255, 192, 203})
 
 /* ================== 生命周期 ================== */
 esp_err_t board_init(void);
@@ -74,6 +82,6 @@ void board_vibrate_tick(void);  // 需要在主循环中调用
 
 /* ================== RGB灯接口 ================== */
 void board_rgb_init(void);
-void board_rgb_set_color(board_rgb_color_t color);
+void board_rgb_set(board_rgb_t color);
 void board_rgb_off(void);
 
