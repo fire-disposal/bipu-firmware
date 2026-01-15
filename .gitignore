@@ -65,7 +65,6 @@ dependencies.lock
 managed_components/
 
 # IDE specific files
-.vscode/
 .idea/
 *.swp
 *.swo

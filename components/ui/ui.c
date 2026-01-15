@@ -65,13 +65,6 @@ void ui_init(void)
     s_ui.state = UI_STATE_MAIN;
     ui_update_activity();
 
-    // 添加测试消息
-    ui_add_message_internal("System", "Welcome to BiPi Pager!");
-    ui_add_message_internal("Alice", "Hello there!");
-    ui_add_message_internal("Bob", "This is a very long message to test the word wrapping functionality.");
-    ui_add_message_internal("张三", "你好，这是一条中文消息测试。");
-    ui_add_message_internal("李四", "这是一条非常长的中文消息，用来测试换行显示是否正常。");
-
     ESP_LOGI(UI_TAG, "UI组件初始化完成");
 }
 

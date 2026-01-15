@@ -1,0 +1,30 @@
+{
+    // C/C++ 插件配置：强制指定 compile_commands.json 的路径
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+
+    // C/C++ 插件配置：禁用默认的 IntelliSense 模式
+    // 强制使用 compile_commands.json 提供的精确信息
+    "C_Cpp.default.intelliSenseMode": "clang-x64", // 这是一个通用设置，但关键在于 compileCommands
+
+    // 推荐：将 VS Code 识别的 C 标准设为 GNU11（ESP-IDF 常用）
+    "C_Cpp.default.cStandard": "gnu11",
+    "C_Cpp.default.cppStandard": "gnu++17",
+
+    // 推荐：配置 CMake Tools 避免它在后台自动构建，与 idf.py 冲突
+    "cmake.configureOnOpen": false,
+    "cmake.configureOnEdit": false,
+
+    // 推荐：告诉 CMake Tools 哪个文件是项目根 CMakeLists.txt
+    "cmake.sourceDirectory": "${workspaceFolder}",
+
+    // 推荐：告诉 CMake Tools 构建输出在哪里
+    "cmake.buildDirectory": "${workspaceFolder}/build",
+    "files.associations": {
+        "my_lib.h": "c",
+        "stdio.h": "c",
+        "freertos.h": "c",
+        "task.h": "c",
+        "memory": "cpp",
+        "iostream": "cpp"
+    }
+}
