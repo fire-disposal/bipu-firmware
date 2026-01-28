@@ -8,6 +8,8 @@
 extern "C" {
 #endif
 
+#include "ui_types.h"
+
 /* ================== UI 类型定义 ================== */
 
 typedef enum {
@@ -18,36 +20,23 @@ typedef enum {
 
 /* ================== UI 核心接口 ================== */
 
-/**
- * @brief 初始化UI组件
- */
 void ui_init(void);
-
-/**
- * @brief UI主循环tick，需要定期调用
- */
 void ui_tick(void);
-
-/**
- * @brief 处理按键事件
- * @param key 按键键值
- */
 void ui_on_key(board_key_t key);
+void ui_change_page(ui_state_enum_t new_state);
 
-/* ================== 消息接口 ================== */
+/* ================== 消息数据接口 ================== */
+int ui_get_message_count(void);
+int ui_get_unread_count(void);
+int ui_get_current_message_idx(void);
+void ui_set_current_message_idx(int idx);
+ui_message_t* ui_get_message_at(int idx);
 
-/**
- * @brief 显示新消息（会自动唤醒屏幕并跳转到消息页）
- * @param sender 发送者名称
- * @param text 消息内容
- */
+/* ================== 业务接口 ================== */
 void ui_show_message(const char* sender, const char* text);
+void ui_enter_standby(void);
+void ui_wake_up(void);
 
-/* ================== 控制接口 ================== */
-
-/**
- * @brief 进入待机模式
- */
 void ui_enter_standby(void);
 
 /**

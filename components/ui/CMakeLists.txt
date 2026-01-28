@@ -1,5 +1,12 @@
 idf_component_register(
-    SRCS "ui.c" "ui_render.c"
-    INCLUDE_DIRS "include"
-    REQUIRES board ble
+    SRCS
+        "ui.c"
+        "ui_render.c"
+        "src/ui_page_main.c"
+        "src/ui_page_message.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        board
+        u8g2
 )

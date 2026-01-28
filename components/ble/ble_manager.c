@@ -1,5 +1,4 @@
 #include "ble_manager.h"
-#include "board.h"
 #include "esp_log.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
@@ -58,90 +57,13 @@ const char* ble_manager_state_to_string(ble_state_t state)
 }
 
 /* ================== 协议处理 ================== */
-static uint8_t calculate_checksum(const uint8_t *data, size_t len) {
-    uint8_t sum = 0;
-    for (size_t i = 0; i < len; i++) {
-        sum += data[i];
+static void handle_write_data(const uint8_t *data, uint16_t len) {
+    ble_parsed_msg_t msg;
+    if (ble_protocol_parse(data, len, &msg)) {
+        if (s_message_callback) {
+            s_message_callback(msg.sender, msg.message, &msg.effect);
+        }
     }
-    return sum;
-}
-
-static void process_packet(const uint8_t *data, uint16_t len) {
-    if (len < 9) { // Min length check (Header + 1 color + Vib + TextLen + Checksum)
-        ESP_LOGW(BLE_TAG, "Packet too short: %d", len);
-        return;
-    }
-
-    // 1. Checksum Validation
-    uint8_t received_checksum = data[len - 1];
-    uint8_t calculated_checksum = calculate_checksum(data, len - 1);
-    if (received_checksum != calculated_checksum) {
-        ESP_LOGE(BLE_TAG, "Checksum failed: Recv 0x%02X, Calc 0x%02X", received_checksum, calculated_checksum);
-        return;
-    }
-
-    // 2. Protocol Version
-    if (data[0] != PROTOCOL_VERSION) {
-        ESP_LOGE(BLE_TAG, "Invalid Protocol Version: 0x%02X", data[0]);
-        return;
-    }
-
-    // 3. Command Type
-    if (data[1] != CMD_TYPE_MESSAGE) {
-        ESP_LOGW(BLE_TAG, "Unsupported Command Type: 0x%02X", data[1]);
-        return;
-    }
-
-    // Offset tracking
-    size_t offset = 4; // Skip Ver, Type, Seq(2)
-
-    // 4. Colors
-    ble_effect_t effect = {0};
-    uint8_t color_count = data[offset++];
-    if (offset + color_count * 3 > len) return;
-
-    // Process first color for now (Simple implementation)
-    if (color_count > 0) {
-        effect.r = data[offset];
-        effect.g = data[offset + 1];
-        effect.b = data[offset + 2];
-        effect.duration_ms = 3000; // 默认光效持续 3 秒
-        ESP_LOGD(BLE_TAG, "Parsed Color: R=%d, G=%d, B=%d", effect.r, effect.g, effect.b);
-    }
-    offset += color_count * 3;
-
-    // 5. Vibration
-    if (offset + 2 > len) return;
-    uint8_t vib_mode = data[offset++];
-    uint8_t vib_strength = data[offset++]; // Ignored for now
-    (void)vib_strength;
-
-    if (vib_mode != 0) {
-        board_vibrate_on(500); // Default 500ms for now, or map modes
-    }
-
-    // 6. Text
-    if (offset + 1 > len) return;
-    uint8_t text_len = data[offset++];
-    if (offset + text_len > len) return;
-
-    char text_buf[65];
-    if (text_len > 64) text_len = 64;
-    memcpy(text_buf, &data[offset], text_len);
-    text_buf[text_len] = '\0';
-    offset += text_len;
-
-    ESP_LOGI(BLE_TAG, "Received Message: %s", text_buf);
-    
-    // Notify App/UI
-    if (s_message_callback) {
-        s_message_callback("App", text_buf, &effect);
-    }
-
-    // 7. Screen Effect
-    if (offset + 1 > len) return;
-    uint8_t screen_effect = data[offset++];
-    (void)screen_effect; // TODO: Implement screen effects
 }
 
 /* ================== BLE事件处理回调 ================== */
@@ -278,7 +200,7 @@ static void ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t ga
 
         case ESP_GATTS_WRITE_EVT:
             if (param->write.handle == s_cmd_char_handle) {
-                process_packet(param->write.value, param->write.len);
+                handle_write_data(param->write.value, param->write.len);
                 if (param->write.need_rsp) {
                     esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
                 }

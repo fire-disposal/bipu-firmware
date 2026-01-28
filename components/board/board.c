@@ -3,7 +3,6 @@
 #include "driver/i2c.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
-#include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
 #include "rom/ets_sys.h"

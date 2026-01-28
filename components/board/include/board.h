@@ -6,8 +6,8 @@
 /* ================== 显示配置 ================== */
 #define BOARD_TAG "board"
 #define BOARD_I2C_MASTER_PORT     I2C_NUM_0
-#define BOARD_I2C_SDA_IO          GPIO_NUM_2
-#define BOARD_I2C_SCL_IO          GPIO_NUM_1
+#define BOARD_I2C_SDA_IO          GPIO_NUM_21
+#define BOARD_I2C_SCL_IO          GPIO_NUM_20
 #define BOARD_I2C_FREQ_HZ         400000
 #define BOARD_OLED_I2C_ADDRESS    0x3C
 
@@ -21,10 +21,13 @@
 // 震动马达GPIO配置
 #define BOARD_GPIO_VIBRATE    GPIO_NUM_4
 
+// 电池电量GPIO配置
+#define BOARD_GPIO_BATTERY    GPIO_NUM_7
+
 // RGB灯GPIO配置
-#define BOARD_GPIO_RGB_R      GPIO_NUM_45
-#define BOARD_GPIO_RGB_G      GPIO_NUM_48
-#define BOARD_GPIO_RGB_B      GPIO_NUM_47
+#define BOARD_GPIO_RGB_R      GPIO_NUM_40
+#define BOARD_GPIO_RGB_G      GPIO_NUM_41
+#define BOARD_GPIO_RGB_B      GPIO_NUM_42
 
 /* 按键类型定义 */
 typedef enum {
@@ -41,19 +44,6 @@ typedef struct {
     uint8_t g;
     uint8_t b;
 } board_rgb_t;
-
-// 预定义颜色宏
-#define BOARD_COLOR_OFF     ((board_rgb_t){0, 0, 0})
-#define BOARD_COLOR_RED     ((board_rgb_t){255, 0, 0})
-#define BOARD_COLOR_GREEN   ((board_rgb_t){0, 255, 0})
-#define BOARD_COLOR_BLUE    ((board_rgb_t){0, 0, 255})
-#define BOARD_COLOR_YELLOW  ((board_rgb_t){255, 255, 0})
-#define BOARD_COLOR_CYAN    ((board_rgb_t){0, 255, 255})
-#define BOARD_COLOR_MAGENTA ((board_rgb_t){255, 0, 255})
-#define BOARD_COLOR_WHITE   ((board_rgb_t){255, 255, 255})
-#define BOARD_COLOR_ORANGE  ((board_rgb_t){255, 165, 0})
-#define BOARD_COLOR_PURPLE  ((board_rgb_t){128, 0, 128})
-#define BOARD_COLOR_PINK    ((board_rgb_t){255, 192, 203})
 
 /* ================== 生命周期 ================== */
 esp_err_t board_init(void);

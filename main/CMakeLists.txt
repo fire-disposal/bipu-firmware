@@ -1,19 +1,11 @@
 idf_component_register(
     SRCS
         "main.c"
-        "app.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
-        u8g2
-        driver
-        bt
+        app
         board
-        ble
-        ui
     PRIV_REQUIRES
-        esp_timer
-        freertos
         nvs_flash
-        esp_rom
 )
