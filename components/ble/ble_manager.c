@@ -13,6 +13,7 @@ static const char* BLE_TAG = "ble_manager";
 static ble_state_t s_ble_state = BLE_STATE_UNINITIALIZED;
 static bool s_ble_connected = false;
 static ble_message_callback_t s_message_callback = NULL;
+static ble_time_sync_callback_t s_time_sync_callback = NULL;
 static uint16_t s_conn_id = 0xFFFF;
 static uint32_t s_error_count = 0;
 
@@ -58,10 +59,44 @@ const char* ble_manager_state_to_string(ble_state_t state)
 
 /* ================== 协议处理 ================== */
 static void handle_write_data(const uint8_t *data, uint16_t len) {
-    ble_parsed_msg_t msg;
-    if (ble_protocol_parse(data, len, &msg)) {
-        if (s_message_callback) {
-            s_message_callback(msg.sender, msg.message, &msg.effect);
+    if (!data || len == 0) return;
+
+    // 首先检查是否是时间同步命令
+    if (len >= 2 && data[1] == CMD_TYPE_TIME_SYNC) {
+        ble_time_sync_t time_info;
+        if (ble_protocol_parse_time_sync(data, len, &time_info)) {
+            ESP_LOGI(BLE_TAG, "Time sync received: %02d:%02d:%02d, weekday=%d",
+                     time_info.hour, time_info.minute, time_info.second, time_info.weekday);
+            
+            // 发送时间同步响应
+            uint8_t response_data[16];
+            uint16_t response_len = sizeof(response_data);
+            if (ble_protocol_create_time_sync_response(true, response_data, &response_len)) {
+                esp_ble_gatts_send_indicate(s_bipupu_service_handle, s_conn_id, s_status_char_handle,
+                                          response_len, response_data, false);
+            }
+            
+            // 调用时间同步回调
+            if (s_time_sync_callback) {
+                s_time_sync_callback(&time_info);
+            }
+        } else {
+            ESP_LOGE(BLE_TAG, "Failed to parse time sync data");
+            // 发送失败响应
+            uint8_t response_data[16];
+            uint16_t response_len = sizeof(response_data);
+            if (ble_protocol_create_time_sync_response(false, response_data, &response_len)) {
+                esp_ble_gatts_send_indicate(s_bipupu_service_handle, s_conn_id, s_status_char_handle,
+                                          response_len, response_data, false);
+            }
+        }
+    } else {
+        // 处理普通消息命令
+        ble_parsed_msg_t msg;
+        if (ble_protocol_parse(data, len, &msg)) {
+            if (s_message_callback) {
+                s_message_callback(msg.sender, msg.message, &msg.effect);
+            }
         }
     }
 }
@@ -181,6 +216,8 @@ static void ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t ga
             s_ble_connected = true;
             s_conn_id = param->connect.conn_id;
             s_ble_state = BLE_STATE_CONNECTED;
+            ESP_LOGI(BLE_TAG, "Device connected, conn_id=%d", s_conn_id);
+            
             // Update connection params if needed
             esp_ble_conn_update_params_t conn_params = {0};
             memcpy(conn_params.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
@@ -189,6 +226,10 @@ static void ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t ga
             conn_params.latency = 0;
             conn_params.timeout = 400;
             esp_ble_gap_update_conn_params(&conn_params);
+            
+            // 连接成功后自动触发时间同步（延迟1秒，确保连接稳定）
+            // 这里我们模拟从手机接收时间同步命令，实际应用中手机会主动发送
+            ESP_LOGI(BLE_TAG, "Connection established, waiting for time sync from mobile app");
             break;
 
         case ESP_GATTS_DISCONNECT_EVT:
@@ -336,14 +377,37 @@ uint32_t ble_manager_get_error_count(void)
 
 void ble_manager_poll(void)
 {
+    // 可以在这里添加周期性任务，如电量低警告等
 }
 
 void ble_manager_update_battery_level(uint8_t level)
 {
     if (level > 100) level = 100;
-    s_battery_level = level;
     
-    if (s_ble_connected && s_battery_level_char_handle != 0) {
-        esp_ble_gatts_send_indicate(s_bipupu_service_handle, s_conn_id, s_battery_level_char_handle, 1, &s_battery_level, false);
+    // 只有当电量真正发生变化时才更新
+    if (s_battery_level != level) {
+        s_battery_level = level;
+        ESP_LOGI(BLE_TAG, "Battery level updated: %d%%", s_battery_level);
+        
+        // 发送电量通知（如果已连接并且特征值已配置通知）
+        if (s_ble_connected && s_battery_level_char_handle != 0) {
+            esp_err_t ret = esp_ble_gatts_send_indicate(s_battery_service_handle, s_conn_id,
+                                                       s_battery_level_char_handle, 1, &s_battery_level, false);
+            if (ret != ESP_OK) {
+                ESP_LOGE(BLE_TAG, "Failed to send battery notification: %s", esp_err_to_name(ret));
+            } else {
+                ESP_LOGD(BLE_TAG, "Battery notification sent successfully");
+            }
+        }
+        
+        // 低电量警告（可选功能）
+        if (s_battery_level <= 20) {
+            ESP_LOGW(BLE_TAG, "Low battery warning: %d%%", s_battery_level);
+        }
     }
+}
+
+void ble_manager_set_time_sync_callback(ble_time_sync_callback_t callback)
+{
+    s_time_sync_callback = callback;
 }

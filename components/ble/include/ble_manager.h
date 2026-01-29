@@ -5,50 +5,12 @@
 #include "esp_err.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gatts_api.h"
+#include "ble_config.h"
+#include "ble_protocol.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* ================== BLE配置常量 ================== */
-#define BLE_DEVICE_NAME           "BIPU_Device"
-#define BLE_MAX_MESSAGE_LEN       128
-#define BLE_ADV_INTERVAL_MIN      0x20
-#define BLE_ADV_INTERVAL_MAX      0x40
-
-/* ================== UUID 定义 ================== */
-// Bipupu Service: 6E400001-B5A3-F393-E0A9-E50E24DCCA9E
-#define BIPUPU_SERVICE_UUID_128   {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x01, 0x00, 0x40, 0x6E}
-// Command Input: 6E400003-B5A3-F393-E0A9-E50E24DCCA9E
-#define BIPUPU_CHAR_CMD_UUID_128  {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40, 0x6E}
-// Status Output: 6E400004-B5A3-F393-E0A9-E50E24DCCA9E
-#define BIPUPU_CHAR_STATUS_UUID_128 {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x04, 0x00, 0x40, 0x6E}
-
-// Battery Service: 0x180F
-#define BATTERY_SERVICE_UUID      0x180F
-// Battery Level: 0x2A19
-#define BATTERY_LEVEL_UUID        0x2A19
-
-#include "ble_protocol.h"
-
-/* ================== BLE配置常量 ================== */
-#define BLE_DEVICE_NAME           "BIPU_Device"
-#define BLE_MAX_MESSAGE_LEN       128
-#define BLE_ADV_INTERVAL_MIN      0x20
-#define BLE_ADV_INTERVAL_MAX      0x40
-
-/* ================== UUID 定义 ================== */
-// Bipupu Service: 6E400001-B5A3-F393-E0A9-E50E24DCCA9E
-#define BIPUPU_SERVICE_UUID_128   {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x01, 0x00, 0x40, 0x6E}
-// Command Input: 6E400003-B5A3-F393-E0A9-E50E24DCCA9E
-#define BIPUPU_CHAR_CMD_UUID_128  {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40, 0x6E}
-// Status Output: 6E400004-B5A3-F393-E0A9-E50E24DCCA9E
-#define BIPUPU_CHAR_STATUS_UUID_128 {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x04, 0x00, 0x40, 0x6E}
-
-// Battery Service: 0x180F
-#define BATTERY_SERVICE_UUID      0x180F
-// Battery Level: 0x2A19
-#define BATTERY_LEVEL_UUID        0x2A19
 
 /* ================== BLE状态枚举 ================== */
 typedef enum {
@@ -62,6 +24,9 @@ typedef enum {
 
 /* BLE消息接收回调函数类型 */
 typedef void (*ble_message_callback_t)(const char* sender, const char* message, const ble_effect_t* effect);
+
+/* 时间同步回调函数类型 */
+typedef void (*ble_time_sync_callback_t)(const ble_time_sync_t* time_info);
 
 
 /* ================== BLE管理接口 ================== */
@@ -101,6 +66,12 @@ esp_err_t ble_manager_stop_advertising(void);
  * @param callback 回调函数指针，为NULL时取消回调
  */
 void ble_manager_set_message_callback(ble_message_callback_t callback);
+
+/**
+ * @brief 设置时间同步回调
+ * @param callback 回调函数指针，为NULL时取消回调
+ */
+void ble_manager_set_time_sync_callback(ble_time_sync_callback_t callback);
 
 /**
  * @brief 检查BLE是否已连接
