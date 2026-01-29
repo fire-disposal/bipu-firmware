@@ -3,32 +3,6 @@
 #include <stdbool.h>
 #include "esp_err.h"
 
-/* ================== 显示配置 ================== */
-#define BOARD_TAG "board"
-#define BOARD_I2C_MASTER_PORT     I2C_NUM_0
-#define BOARD_I2C_SDA_IO          GPIO_NUM_21
-#define BOARD_I2C_SCL_IO          GPIO_NUM_20
-#define BOARD_I2C_FREQ_HZ         400000
-#define BOARD_OLED_I2C_ADDRESS    0x3C
-
-/* ================== GPIO配置 ================== */
-// 按键GPIO配置（按钮按下时接GND）
-#define BOARD_GPIO_KEY_UP     GPIO_NUM_10
-#define BOARD_GPIO_KEY_DOWN   GPIO_NUM_11
-#define BOARD_GPIO_KEY_ENTER  GPIO_NUM_12
-#define BOARD_GPIO_KEY_BACK   GPIO_NUM_13
-
-// 震动马达GPIO配置
-#define BOARD_GPIO_VIBRATE    GPIO_NUM_4
-
-// 电池电量GPIO配置
-#define BOARD_GPIO_BATTERY    GPIO_NUM_7
-
-// RGB灯GPIO配置
-#define BOARD_GPIO_RGB_R      GPIO_NUM_40
-#define BOARD_GPIO_RGB_G      GPIO_NUM_41
-#define BOARD_GPIO_RGB_B      GPIO_NUM_42
-
 /* 按键类型定义 */
 typedef enum {
     BOARD_KEY_NONE = -1,
@@ -63,7 +37,7 @@ void board_delay_ms(uint32_t ms);
 
 /* ================== 反馈接口 ================== */
 void board_notify(void);
-
+    
 /* ================== 震动接口 ================== */
 void board_vibrate_init(void);
 esp_err_t board_vibrate_on(uint32_t ms);
@@ -74,4 +48,8 @@ void board_vibrate_tick(void);  // 需要在主循环中调用
 void board_rgb_init(void);
 void board_rgb_set(board_rgb_t color);
 void board_rgb_off(void);
+
+/* ================== 电源管理接口 ================== */
+float board_battery_voltage(void);
+uint8_t board_battery_percent(void);
 

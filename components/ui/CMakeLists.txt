@@ -8,5 +8,7 @@ idf_component_register(
         "include"
     REQUIRES
         board
+    PRIV_REQUIRES
+        ble
         u8g2
 )

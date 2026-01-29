@@ -21,3 +21,8 @@ Diagnostics:
   # 屏蔽 clangd 对未知/非法命令行参数的报错
     - drv_unknown_argument
     - drv_unknown_argument_with_suggestion
+  # 屏蔽未使用的头文件警告（FreeRTOS 等库常出现误报）
+    - unused-includes
+
+  # 屏蔽文件找不到的错误（针对 IDF 内部路径映射问题）
+    - pp_file_not_found

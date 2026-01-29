@@ -4,8 +4,6 @@
 #include "app.h"
 #include "esp_log.h"
 #include "esp_err.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 static const char* APP_TAG = "app";
 
@@ -130,7 +128,7 @@ void app_loop(void)
                 if (current_time - last_blink_time > 200) { // 加快闪烁频率 (5Hz)
                     static bool led_state = false;
                     if (led_state) {
-                        board_rgb_set(BOARD_COLOR_BLUE);
+                        board_rgb_set((board_rgb_t){0, 0, 255});
                     } else {
                         board_rgb_off();
                     }

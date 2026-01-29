@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 /* ================== 协议定义 ================== */
 #define PROTOCOL_VERSION          0x01

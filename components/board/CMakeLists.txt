@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "board.c"
+    SRCS "board.c" "i2c.c" "display.c" "key.c" "vibrate.c" "rgb.c" "power.c"
     INCLUDE_DIRS "include"
-    REQUIRES driver u8g2 esp_timer
+    PRIV_REQUIRES driver u8g2 esp_timer freertos esp_adc
 )
