@@ -4,6 +4,7 @@
 #include "app.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include <time.h>
 
 static const char* APP_TAG = "app";
 
@@ -38,6 +39,29 @@ static void ble_message_received(const char* sender, const char* message, const 
     ui_show_message(sender, message);
 }
 
+/* ===================== CTS 时间同步回调 ===================== */
+static void ble_cts_time_received(const ble_cts_time_t* cts_time)
+{
+    if (!cts_time) {
+        ESP_LOGW(APP_TAG, "CTS 回调接收到无效参数");
+        return;
+    }
+
+    ESP_LOGI(APP_TAG, "CTS 时间已接收 - %04d-%02d-%02d %02d:%02d:%02d (weekday=%d)",
+             cts_time->year, cts_time->month, cts_time->day,
+             cts_time->hour, cts_time->minute, cts_time->second, cts_time->weekday);
+
+    // 使用 board 层的 RTC 接口设置系统时间
+    esp_err_t ret = board_set_rtc(cts_time->year, cts_time->month, cts_time->day,
+                                  cts_time->hour, cts_time->minute, cts_time->second);
+    if (ret == ESP_OK) {
+        ESP_LOGI(APP_TAG, "RTC 已成功更新");
+        board_notify();  // 提示用户时间已更新
+    } else {
+        ESP_LOGE(APP_TAG, "RTC 更新失败: %s", esp_err_to_name(ret));
+    }
+}
+
 /* ===================== 应用初始化 ===================== */
 esp_err_t app_init(void)
 {
@@ -57,7 +81,10 @@ esp_err_t app_init(void)
     
     // 设置 BLE 消息接收回调
     ble_manager_set_message_callback(ble_message_received);
-    
+
+    // 设置 CTS 时间同步回调 (蓝牙标准 Current Time Service)
+    ble_manager_set_cts_time_callback(ble_cts_time_received);
+
     // 启动 BLE 广告
     ret = ble_manager_start_advertising();
     if (ret != ESP_OK) {

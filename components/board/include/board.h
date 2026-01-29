@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <stdbool.h>
+#include <time.h>
 #include "esp_err.h"
 
 /* 按键类型定义 */
@@ -34,6 +35,27 @@ board_key_t board_key_poll(void);
 /* ================== 时间接口 ================== */
 uint32_t board_time_ms(void);
 void board_delay_ms(uint32_t ms);
+
+/* ================== RTC (实时时钟) 接口 ================== */
+/**
+ * @brief 设置系统时间 (RTC)
+ * @param year 年份 (2000-2099)
+ * @param month 月份 (1-12)
+ * @param day 日期 (1-31)
+ * @param hour 小时 (0-23)
+ * @param minute 分钟 (0-59)
+ * @param second 秒钟 (0-59)
+ * @return ESP_OK 成功，其他值表示错误
+ */
+esp_err_t board_set_rtc(uint16_t year, uint8_t month, uint8_t day, 
+                        uint8_t hour, uint8_t minute, uint8_t second);
+
+/**
+ * @brief 从 time_t 时间戳设置 RTC
+ * @param timestamp 时间戳 (从1970年1月1日起的秒数)
+ * @return ESP_OK 成功，其他值表示错误
+ */
+esp_err_t board_set_rtc_from_timestamp(time_t timestamp);
 
 /* ================== 反馈接口 ================== */
 void board_notify(void);

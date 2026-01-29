@@ -25,9 +25,8 @@ typedef enum {
 /* BLE消息接收回调函数类型 */
 typedef void (*ble_message_callback_t)(const char* sender, const char* message, const ble_effect_t* effect);
 
-/* 时间同步回调函数类型 */
-typedef void (*ble_time_sync_callback_t)(const ble_time_sync_t* time_info);
-
+/* CTS 时间同步回调函数类型 (蓝牙标准 Current Time Service) */
+typedef void (*ble_cts_time_callback_t)(const ble_cts_time_t* cts_time);
 
 /* ================== BLE管理接口 ================== */
 
@@ -68,10 +67,10 @@ esp_err_t ble_manager_stop_advertising(void);
 void ble_manager_set_message_callback(ble_message_callback_t callback);
 
 /**
- * @brief 设置时间同步回调
+ * @brief 设置 CTS 时间同步回调 (蓝牙标准 Current Time Service)
  * @param callback 回调函数指针，为NULL时取消回调
  */
-void ble_manager_set_time_sync_callback(ble_time_sync_callback_t callback);
+void ble_manager_set_cts_time_callback(ble_cts_time_callback_t callback);
 
 /**
  * @brief 检查BLE是否已连接

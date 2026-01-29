@@ -79,72 +79,107 @@ bool ble_protocol_parse(const uint8_t *data, uint16_t len, ble_parsed_msg_t *out
     return true;
 }
 
-bool ble_protocol_parse_time_sync(const uint8_t *data, uint16_t len, ble_time_sync_t *out_time) {
-    if (!data || !out_time || len < 6) {
+/* ================== CTS (Current Time Service) 协议实现 ================== */
+
+bool ble_protocol_parse_cts_time(const uint8_t *data, uint16_t len, ble_cts_time_t *out_time) {
+    if (!data || !out_time || len < 10) {
+        ESP_LOGE(TAG, "CTS 数据长度不足: %d (需要至少10字节)", len);
         return false;
     }
 
-    // 1. Checksum Validation
-    uint8_t received_checksum = data[len - 1];
-    uint8_t calculated_checksum = calculate_checksum(data, len - 1);
-    if (received_checksum != calculated_checksum) {
-        ESP_LOGE(TAG, "Time sync checksum failed: Recv 0x%02X, Calc 0x%02X", received_checksum, calculated_checksum);
-        return false;
-    }
+    // CTS Current Time 格式 (10字节):
+    // Offset 0-1: 年份 (little-endian, uint16)
+    // Offset 2:   月份 (1-12)
+    // Offset 3:   日期 (1-31)
+    // Offset 4:   小时 (0-23)
+    // Offset 5:   分钟 (0-59)
+    // Offset 6:   秒钟 (0-59)
+    // Offset 7:   星期 (0=周日, 1=周一, ..., 6=周六)
+    // Offset 8:   分数秒 (1/256秒单位, 0-255)
+    // Offset 9:   调整原因 (可选，用于解释时间更新的原因)
 
-    // 2. Protocol Version
-    if (data[0] != PROTOCOL_VERSION) {
-        ESP_LOGE(TAG, "Invalid Protocol Version: 0x%02X", data[0]);
-        return false;
-    }
+    // 解析年份 (小端字节序)
+    out_time->year = (uint16_t)(data[0] | (data[1] << 8));
 
-    // 3. Command Type
-    if (data[1] != CMD_TYPE_TIME_SYNC) {
-        ESP_LOGW(TAG, "Not a time sync command: 0x%02X", data[1]);
-        return false;
-    }
+    // 解析月份
+    out_time->month = data[2];
 
-    // 4. Parse time data (skip sequence bytes)
-    if (len < 7) return false; // Ver(1) + Type(1) + Seq(2) + Hour(1) + Min(1) + Sec(1) + Week(1) + Checksum(1)
-    
-    out_time->hour = data[4];     // 小时
-    out_time->minute = data[5];   // 分钟
-    out_time->second = data[6];   // 秒钟
-    out_time->weekday = data[7];  // 星期
+    // 解析日期
+    out_time->day = data[3];
+
+    // 解析时间
+    out_time->hour = data[4];
+    out_time->minute = data[5];
+    out_time->second = data[6];
+
+    // 解析星期
+    out_time->weekday = data[7];
+
+    // 解析分数秒
+    out_time->fractions = data[8];
+
+    // 解析调整原因
+    out_time->adjust_reason = data[9];
 
     // 验证时间数据的有效性
-    if (out_time->hour > 23 || out_time->minute > 59 || out_time->second > 59 || out_time->weekday > 6) {
-        ESP_LOGE(TAG, "Invalid time data: hour=%d, min=%d, sec=%d, weekday=%d",
+    if (out_time->month < 1 || out_time->month > 12 ||
+        out_time->day < 1 || out_time->day > 31 ||
+        out_time->hour > 23 || out_time->minute > 59 || out_time->second > 59 ||
+        out_time->weekday > 6) {
+        ESP_LOGE(TAG, "CTS 时间数据无效: %04d-%02d-%02d %02d:%02d:%02d (weekday=%d)",
+                 out_time->year, out_time->month, out_time->day,
                  out_time->hour, out_time->minute, out_time->second, out_time->weekday);
         return false;
     }
 
-    ESP_LOGI(TAG, "Time sync parsed: %02d:%02d:%02d, weekday=%d",
-             out_time->hour, out_time->minute, out_time->second, out_time->weekday);
-    
+    ESP_LOGI(TAG, "CTS 时间已解析: %04d-%02d-%02d %02d:%02d:%02d (weekday=%d, fractions=%d, reason=%d)",
+             out_time->year, out_time->month, out_time->day,
+             out_time->hour, out_time->minute, out_time->second,
+             out_time->weekday, out_time->fractions, out_time->adjust_reason);
+
     return true;
 }
 
-bool ble_protocol_create_time_sync_response(bool success, uint8_t *out_data, uint16_t *out_len) {
-    if (!out_data || !out_len) {
+bool ble_protocol_create_cts_response(const ble_cts_time_t *time_info, uint8_t *out_data, uint16_t *out_len) {
+    if (!time_info || !out_data || !out_len) {
         return false;
     }
 
-    if (*out_len < 6) {
+    if (*out_len < 10) {
+        ESP_LOGE(TAG, "CTS 响应缓冲区不足: %d (需要10字节)", *out_len);
         return false;
     }
 
-    // 构建响应包: Ver(1) + Type(1) + Seq(2) + Status(1) + Checksum(1)
-    out_data[0] = PROTOCOL_VERSION;
-    out_data[1] = CMD_TYPE_TIME_SYNC;
-    out_data[2] = 0x00; // Sequence (low byte)
-    out_data[3] = 0x00; // Sequence (high byte)
-    out_data[4] = success ? 0x01 : 0x00; // Status: 1=success, 0=failed
-    
-    // Calculate checksum
-    out_data[5] = calculate_checksum(out_data, 5);
-    
-    *out_len = 6;
-    
+    // 构建 CTS Current Time 格式 (10字节)
+    // Offset 0-1: 年份 (小端字节序)
+    out_data[0] = (uint8_t)(time_info->year & 0xFF);
+    out_data[1] = (uint8_t)((time_info->year >> 8) & 0xFF);
+
+    // Offset 2: 月份
+    out_data[2] = time_info->month;
+
+    // Offset 3: 日期
+    out_data[3] = time_info->day;
+
+    // Offset 4-6: 时间
+    out_data[4] = time_info->hour;
+    out_data[5] = time_info->minute;
+    out_data[6] = time_info->second;
+
+    // Offset 7: 星期
+    out_data[7] = time_info->weekday;
+
+    // Offset 8: 分数秒
+    out_data[8] = time_info->fractions;
+
+    // Offset 9: 调整原因
+    out_data[9] = time_info->adjust_reason;
+
+    *out_len = 10;
+
+    ESP_LOGI(TAG, "CTS 响应已创建: %04d-%02d-%02d %02d:%02d:%02d",
+             time_info->year, time_info->month, time_info->day,
+             time_info->hour, time_info->minute, time_info->second);
+
     return true;
 }

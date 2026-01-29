@@ -13,7 +13,7 @@ static const char* BLE_TAG = "ble_manager";
 static ble_state_t s_ble_state = BLE_STATE_UNINITIALIZED;
 static bool s_ble_connected = false;
 static ble_message_callback_t s_message_callback = NULL;
-static ble_time_sync_callback_t s_time_sync_callback = NULL;
+static ble_cts_time_callback_t s_cts_time_callback = NULL;
 static uint16_t s_conn_id = 0xFFFF;
 static uint32_t s_error_count = 0;
 
@@ -25,12 +25,20 @@ static uint16_t s_status_char_handle;
 static uint16_t s_battery_service_handle;
 static uint16_t s_battery_level_char_handle;
 
+// CTS 服务句柄
+static uint16_t s_cts_service_handle;
+static uint16_t s_cts_time_char_handle;
+static uint16_t s_cts_local_time_char_handle;
+
 // UUIDs
 static const uint8_t s_bipupu_service_uuid[16] = BIPUPU_SERVICE_UUID_128;
 static const uint8_t s_cmd_char_uuid[16] = BIPUPU_CHAR_CMD_UUID_128;
 static const uint8_t s_status_char_uuid[16] = BIPUPU_CHAR_STATUS_UUID_128;
 static const uint16_t s_battery_service_uuid = BATTERY_SERVICE_UUID;
 static const uint16_t s_battery_level_uuid = BATTERY_LEVEL_UUID;
+static const uint16_t s_cts_service_uuid = CTS_SERVICE_UUID;
+static const uint16_t s_cts_time_uuid = CTS_CURRENT_TIME_UUID;
+static const uint16_t s_cts_local_time_uuid = CTS_LOCAL_TIME_INFO_UUID;
 
 // Battery Level
 static uint8_t s_battery_level = 100;
@@ -61,43 +69,34 @@ const char* ble_manager_state_to_string(ble_state_t state)
 static void handle_write_data(const uint8_t *data, uint16_t len) {
     if (!data || len == 0) return;
 
-    // 首先检查是否是时间同步命令
-    if (len >= 2 && data[1] == CMD_TYPE_TIME_SYNC) {
-        ble_time_sync_t time_info;
-        if (ble_protocol_parse_time_sync(data, len, &time_info)) {
-            ESP_LOGI(BLE_TAG, "Time sync received: %02d:%02d:%02d, weekday=%d",
-                     time_info.hour, time_info.minute, time_info.second, time_info.weekday);
-            
-            // 发送时间同步响应
-            uint8_t response_data[16];
-            uint16_t response_len = sizeof(response_data);
-            if (ble_protocol_create_time_sync_response(true, response_data, &response_len)) {
-                esp_ble_gatts_send_indicate(s_bipupu_service_handle, s_conn_id, s_status_char_handle,
-                                          response_len, response_data, false);
-            }
-            
-            // 调用时间同步回调
-            if (s_time_sync_callback) {
-                s_time_sync_callback(&time_info);
-            }
-        } else {
-            ESP_LOGE(BLE_TAG, "Failed to parse time sync data");
-            // 发送失败响应
-            uint8_t response_data[16];
-            uint16_t response_len = sizeof(response_data);
-            if (ble_protocol_create_time_sync_response(false, response_data, &response_len)) {
-                esp_ble_gatts_send_indicate(s_bipupu_service_handle, s_conn_id, s_status_char_handle,
-                                          response_len, response_data, false);
-            }
+    // 处理消息命令
+    ble_parsed_msg_t msg;
+    if (ble_protocol_parse(data, len, &msg)) {
+        if (s_message_callback) {
+            s_message_callback(msg.sender, msg.message, &msg.effect);
+        }
+    }
+}
+
+/* 处理 CTS 时间写入 (当客户端写入当前时间特征值时) */
+static void handle_cts_write(const uint8_t *data, uint16_t len) {
+    if (!data || len < 10) {
+        ESP_LOGE(BLE_TAG, "CTS 数据长度不足: %d", len);
+        return;
+    }
+
+    ble_cts_time_t cts_time;
+    if (ble_protocol_parse_cts_time(data, len, &cts_time)) {
+        ESP_LOGI(BLE_TAG, "CTS 时间已接收: %04d-%02d-%02d %02d:%02d:%02d",
+                 cts_time.year, cts_time.month, cts_time.day,
+                 cts_time.hour, cts_time.minute, cts_time.second);
+        
+        // 调用 CTS 时间同步回调
+        if (s_cts_time_callback) {
+            s_cts_time_callback(&cts_time);
         }
     } else {
-        // 处理普通消息命令
-        ble_parsed_msg_t msg;
-        if (ble_protocol_parse(data, len, &msg)) {
-            if (s_message_callback) {
-                s_message_callback(msg.sender, msg.message, &msg.effect);
-            }
-        }
+        ESP_LOGE(BLE_TAG, "Failed to parse CTS time data");
     }
 }
 
@@ -130,6 +129,16 @@ static void ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t ga
 
                 ret = esp_ble_gatts_create_service(gatts_if, &battery_service_id, 4);
                 if (ret != ESP_OK) ble_handle_error("Create Battery Service", ret);
+
+                // 3. Create CTS (Current Time Service) - 蓝牙标准时间同步服务
+                esp_gatt_srvc_id_t cts_service_id;
+                cts_service_id.is_primary = true;
+                cts_service_id.id.inst_id = 2;
+                cts_service_id.id.uuid.len = ESP_UUID_LEN_16;
+                cts_service_id.id.uuid.uuid.uuid16 = s_cts_service_uuid;
+
+                ret = esp_ble_gatts_create_service(gatts_if, &cts_service_id, 5); // Handles: Svc + CTS Time + Local Time + 2*Desc
+                if (ret != ESP_OK) ble_handle_error("Create CTS Service", ret);
 
             } else {
                 ble_handle_error("GATT Register", ESP_FAIL);
@@ -178,6 +187,34 @@ static void ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t ga
                                          ESP_GATT_PERM_READ,
                                          ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
                                          &bat_val, NULL);
+
+                } else if (param->create.service_id.id.inst_id == 2) { // CTS Service
+                    s_cts_service_handle = param->create.service_handle;
+                    esp_ble_gatts_start_service(s_cts_service_handle);
+
+                    // Add Current Time characteristic (读写，支持通知)
+                    esp_bt_uuid_t cts_time_uuid;
+                    cts_time_uuid.len = ESP_UUID_LEN_16;
+                    cts_time_uuid.uuid.uuid16 = s_cts_time_uuid;
+
+                    // CTS Current Time 数据为10字节
+                    esp_attr_value_t cts_time_val = { .attr_max_len = 10, .attr_len = 0, .attr_value = NULL };
+                    esp_ble_gatts_add_char(s_cts_service_handle, &cts_time_uuid,
+                                         ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,  // 支持读写
+                                         ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
+                                         &cts_time_val, NULL);
+
+                    // Add Local Time Info characteristic (可选，用于时区)
+                    esp_bt_uuid_t cts_local_time_uuid;
+                    cts_local_time_uuid.len = ESP_UUID_LEN_16;
+                    cts_local_time_uuid.uuid.uuid16 = s_cts_local_time_uuid;
+
+                    // Local Time Info 为2字节 (时区 + DST)
+                    esp_attr_value_t cts_local_time_val = { .attr_max_len = 2, .attr_len = 0, .attr_value = NULL };
+                    esp_ble_gatts_add_char(s_cts_service_handle, &cts_local_time_uuid,
+                                         ESP_GATT_PERM_READ,
+                                         ESP_GATT_CHAR_PROP_BIT_READ,
+                                         &cts_local_time_val, NULL);
                 }
             }
             break;
@@ -201,6 +238,16 @@ static void ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t ga
                         esp_bt_uuid_t cccd_uuid = { .len = ESP_UUID_LEN_16, .uuid = { .uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG } };
                         esp_attr_value_t cccd_val = { .attr_max_len = 2, .attr_len = 2, .attr_value = (uint8_t[]){0x00, 0x00} };
                         esp_ble_gatts_add_char_descr(s_battery_service_handle, &cccd_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE, &cccd_val, NULL);
+                    } else if (param->add_char.char_uuid.uuid.uuid16 == s_cts_time_uuid) {
+                        // CTS Current Time characteristic
+                        s_cts_time_char_handle = param->add_char.attr_handle;
+                        // Add CCCD for Notify
+                        esp_bt_uuid_t cccd_uuid = { .len = ESP_UUID_LEN_16, .uuid = { .uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG } };
+                        esp_attr_value_t cccd_val = { .attr_max_len = 2, .attr_len = 2, .attr_value = (uint8_t[]){0x00, 0x00} };
+                        esp_ble_gatts_add_char_descr(s_cts_service_handle, &cccd_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE, &cccd_val, NULL);
+                    } else if (param->add_char.char_uuid.uuid.uuid16 == s_cts_local_time_uuid) {
+                        // CTS Local Time Info characteristic
+                        s_cts_local_time_char_handle = param->add_char.attr_handle;
                     }
                 }
             }
@@ -242,6 +289,12 @@ static void ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t ga
         case ESP_GATTS_WRITE_EVT:
             if (param->write.handle == s_cmd_char_handle) {
                 handle_write_data(param->write.value, param->write.len);
+                if (param->write.need_rsp) {
+                    esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
+                }
+            } else if (param->write.handle == s_cts_time_char_handle) {
+                // 处理 CTS Current Time 写入 (客户端推送时间)
+                handle_cts_write(param->write.value, param->write.len);
                 if (param->write.need_rsp) {
                     esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
                 }
@@ -355,6 +408,11 @@ void ble_manager_set_message_callback(ble_message_callback_t callback)
     s_message_callback = callback;
 }
 
+void ble_manager_set_cts_time_callback(ble_cts_time_callback_t callback)
+{
+    s_cts_time_callback = callback;
+}
+
 bool ble_manager_is_connected(void)
 {
     return s_ble_connected;
@@ -405,9 +463,4 @@ void ble_manager_update_battery_level(uint8_t level)
             ESP_LOGW(BLE_TAG, "Low battery warning: %d%%", s_battery_level);
         }
     }
-}
-
-void ble_manager_set_time_sync_callback(ble_time_sync_callback_t callback)
-{
-    s_time_sync_callback = callback;
 }

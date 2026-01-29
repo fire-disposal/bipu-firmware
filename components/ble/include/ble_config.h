@@ -25,10 +25,16 @@ extern "C" {
 // Battery Level: 0x2A19
 #define BATTERY_LEVEL_UUID        0x2A19
 
+// Current Time Service (CTS): 0x180A
+#define CTS_SERVICE_UUID          0x180A
+// Current Time: 0x2A2B (读写，用于接收时间更新)
+#define CTS_CURRENT_TIME_UUID     0x2A2B
+// Local Time Info: 0x2A0F (可选，用于时区信息)
+#define CTS_LOCAL_TIME_INFO_UUID  0x2A0F
+
 /* ================== 协议配置 ================== */
 #define PROTOCOL_VERSION          0x01
 #define CMD_TYPE_MESSAGE          0x01
-#define CMD_TYPE_TIME_SYNC        0x02
 
 #ifdef __cplusplus
 }

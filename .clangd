@@ -1,28 +1,22 @@
-# .clangd — ESP-IDF / Xtensa GCC clangd 配置
 CompileFlags:
   # 添加 clangd 可识别的警告屏蔽，减少噪音
   Add:
     - -Wno-unknown-warning-option
     - -Wno-ignored-attributes
     - -Wno-gnu-offsetof-extensions
-
-  # 删除 GCC/Xtensa 专用 flag，clangd 无法识别
   Remove:
     - -mlongcalls
     - -mdisable-hardware-atomics
     - -fno-shrink-wrap
     - -fstrict-volatile-bitfields
     - -fno-tree-switch-conversion
-
 Diagnostics:
   # 屏蔽 clangd 无法识别的 pragma
   Suppress:
     - unknown-pragmas
-  # 屏蔽 clangd 对未知/非法命令行参数的报错
     - drv_unknown_argument
     - drv_unknown_argument_with_suggestion
-  # 屏蔽未使用的头文件警告（FreeRTOS 等库常出现误报）
     - unused-includes
-
-  # 屏蔽文件找不到的错误（针对 IDF 内部路径映射问题）
     - pp_file_not_found
+    - typecheck_decl_incomplete_type
+    - implicit_function_declaration
