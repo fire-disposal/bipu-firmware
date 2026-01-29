@@ -63,12 +63,13 @@ static bool power_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, a
 void board_power_init(void)
 {
     // 1. 获取通道
-    ESP_ERROR_CHECK(adc_oneshot_io_to_channel(BOARD_GPIO_BATTERY, ADC_UNIT, &s_adc_channel));
-    ESP_LOGI(BOARD_TAG, "Battery ADC Channel: %d", s_adc_channel);
+    adc_unit_t unit;
+    ESP_ERROR_CHECK(adc_oneshot_io_to_channel(BOARD_GPIO_BATTERY, &unit, &s_adc_channel));
+    ESP_LOGI(BOARD_TAG, "Battery ADC Channel: %d, Unit: %d", s_adc_channel, unit);
 
     // 2. 配置 ADC 单元
     adc_oneshot_unit_init_cfg_t init_config1 = {
-        .unit_id = ADC_UNIT,
+        .unit_id = unit,
     };
     ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &s_adc1_handle));
 
@@ -80,7 +81,7 @@ void board_power_init(void)
     ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc1_handle, s_adc_channel, &config));
 
     // 4. 校准初始化
-    s_do_calibration = power_adc_calibration_init(ADC_UNIT, s_adc_channel, ADC_ATTEN, &s_adc_cali_handle);
+    s_do_calibration = power_adc_calibration_init(unit, s_adc_channel, ADC_ATTEN, &s_adc_cali_handle);
     
     ESP_LOGI(BOARD_TAG, "Power management initialized");
 }

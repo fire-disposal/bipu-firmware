@@ -3,7 +3,7 @@
 #include "board.h"
 #include <stdio.h>
 #include <string.h>
-
+#include <time.h>
 
 static size_t ui_get_utf8_safe_len(const char *text, size_t max_bytes) {
   size_t i = 0;
@@ -31,21 +31,62 @@ static size_t ui_get_utf8_safe_len(const char *text, size_t max_bytes) {
   return i;
 }
 
-static void ui_render_status_bar(const char *right_text) {
-  // 绘制顶部状态栏背景
-  // board_display_rect(0, 0, 128, 12, true); // 如果需要反色背景
+static void ui_draw_battery(int x, int y) {
+  uint8_t pct = board_battery_percent();
+  if (pct > 100)
+    pct = 100;
 
+  // 电池外框 (18x9)
+  board_display_rect(x, y + 2, 18, 9, false);
+  // 正极头 (2x4)
+  board_display_rect(x + 18, y + 4, 2, 5, true);
+
+  // 电量填充
+  // 内部宽14px
+  int fill_w = (14 * pct) / 100;
+  if (fill_w > 0) {
+    board_display_rect(x + 2, y + 4, fill_w, 5, true);
+  }
+}
+
+static void ui_render_status_bar(const char *center_text) {
   // 绘制分割线
   board_display_rect(0, 12, 128, 1, true);
 
-  // 显示BLE状态
+  // 1. 左侧：BLE状态图标
   bool connected = ble_manager_is_connected();
-  board_display_text(2, 10, connected ? "BLE: OK" : "BLE: --");
-
-  // 右对齐显示文本 (假设字符宽度约6px)
-  if (right_text) {
-    board_display_text(90, 10, right_text);
+  if (connected) {
+    board_display_text(2, 10, "BT");
+    board_display_rect(2, 11, 10, 1, true); // 下划线
+  } else {
+    board_display_text(2, 10, "-X");
   }
+
+  // 2. 中间：系统时间/序号/页码
+  char buf[32];
+  const char *text = center_text;
+
+  if (text == NULL) {
+    time_t now;
+    time(&now);
+    struct tm *timeinfo = localtime(&now);
+    if (timeinfo) {
+      strftime(buf, sizeof(buf), "%H:%M", timeinfo);
+      text = buf;
+    }
+  }
+
+  if (text) {
+    int len = strlen(text);
+    int w = len * 6; // 估算宽度
+    int tx = (128 - w) / 2;
+    if (tx < 20)
+      tx = 20;
+    board_display_text(tx, 10, text);
+  }
+
+  // 3. 右侧：电池电量
+  ui_draw_battery(106, 0);
 }
 
 void ui_render_main(int message_count, int unread_count) {
