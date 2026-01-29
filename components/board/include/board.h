@@ -74,4 +74,5 @@ void board_rgb_off(void);
 /* ================== 电源管理接口 ================== */
 float board_battery_voltage(void);
 uint8_t board_battery_percent(void);
+bool board_battery_is_charging(void);
 

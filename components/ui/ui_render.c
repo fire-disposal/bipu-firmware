@@ -47,6 +47,12 @@ static void ui_draw_battery(int x, int y) {
   if (fill_w > 0) {
     board_display_rect(x + 2, y + 4, fill_w, 5, true);
   }
+  
+  // 充电状态图标 - 只在充电时显示
+  if (board_battery_is_charging()) {
+    // 在电池左侧显示充电图标 "⚡" 或者用简单符号 "+"
+    board_display_text(x - 8, y + 2, "+");
+  }
 }
 
 static void ui_render_status_bar(const char *center_text) {

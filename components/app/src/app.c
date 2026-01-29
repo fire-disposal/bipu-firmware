@@ -128,12 +128,19 @@ void app_loop(void)
     // BLE 轮询（处理 BLE 事件）
     ble_manager_poll();
 
-    // 模拟电池电量更新 (每60秒)
+    // 电池电量更新 (每60秒)
     static uint32_t last_battery_update = 0;
     if (board_time_ms() - last_battery_update > 60000) {
         last_battery_update = board_time_ms();
-        // TODO: 读取实际电池电压
-        ble_manager_update_battery_level(85); 
+        // 读取实际电池电量百分比
+        uint8_t battery_level = board_battery_percent();
+        ble_manager_update_battery_level(battery_level);
+        
+        // 记录电池状态日志
+        float battery_voltage = board_battery_voltage();
+        bool is_charging = board_battery_is_charging();
+        ESP_LOGI(APP_TAG, "电池状态更新 - 电压: %.2fV, 电量: %d%%, 充电状态: %s",
+                 battery_voltage, battery_level, is_charging ? "充电中" : "未充电");
     }
 
     // BLE 连接状态指示（蓝灯闪烁）和时间同步管理
