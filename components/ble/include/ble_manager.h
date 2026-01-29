@@ -104,6 +104,12 @@ const char* ble_manager_get_device_name(void);
 uint32_t ble_manager_get_error_count(void);
 
 /**
+ * @brief 主动请求CTS时间同步
+ * @return ESP_OK 成功，其他值表示错误
+ */
+esp_err_t ble_manager_request_cts_time_sync(void);
+
+/**
  * @brief BLE轮询处理（用于主循环中）
  */
 void ble_manager_poll(void);

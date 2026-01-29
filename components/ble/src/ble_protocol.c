@@ -132,7 +132,7 @@ bool ble_protocol_parse_cts_time(const uint8_t *data, uint16_t len, ble_cts_time
         return false;
     }
 
-    ESP_LOGI(TAG, "CTS 时间已解析: %04d-%02d-%02d %02d:%02d:%02d (weekday=%d, fractions=%d, reason=%d)",
+    ESP_LOGI(TAG, "CTS 时间解析成功: %04d-%02d-%02d %02d:%02d:%02d (weekday=%d, fractions=%d, reason=0x%02X)",
              out_time->year, out_time->month, out_time->day,
              out_time->hour, out_time->minute, out_time->second,
              out_time->weekday, out_time->fractions, out_time->adjust_reason);

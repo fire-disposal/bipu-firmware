@@ -16,6 +16,7 @@ static ble_message_callback_t s_message_callback = NULL;
 static ble_cts_time_callback_t s_cts_time_callback = NULL;
 static uint16_t s_conn_id = 0xFFFF;
 static uint32_t s_error_count = 0;
+static esp_gatt_if_t s_gatts_if = 0;
 
 // Handles
 static uint16_t s_bipupu_service_handle;
@@ -81,22 +82,27 @@ static void handle_write_data(const uint8_t *data, uint16_t len) {
 /* 处理 CTS 时间写入 (当客户端写入当前时间特征值时) */
 static void handle_cts_write(const uint8_t *data, uint16_t len) {
     if (!data || len < 10) {
-        ESP_LOGE(BLE_TAG, "CTS 数据长度不足: %d", len);
+        ESP_LOGE(BLE_TAG, "CTS 数据长度不足: %d (需要至少10字节)", len);
         return;
     }
 
+    ESP_LOGI(BLE_TAG, "接收到CTS时间写入请求，数据长度: %d", len);
+
     ble_cts_time_t cts_time;
     if (ble_protocol_parse_cts_time(data, len, &cts_time)) {
-        ESP_LOGI(BLE_TAG, "CTS 时间已接收: %04d-%02d-%02d %02d:%02d:%02d",
+        ESP_LOGI(BLE_TAG, "CTS时间同步成功 - 日期: %04d-%02d-%02d 时间: %02d:%02d:%02d (星期%d, 调整原因: 0x%02X)",
                  cts_time.year, cts_time.month, cts_time.day,
-                 cts_time.hour, cts_time.minute, cts_time.second);
+                 cts_time.hour, cts_time.minute, cts_time.second,
+                 cts_time.weekday, cts_time.adjust_reason);
         
         // 调用 CTS 时间同步回调
         if (s_cts_time_callback) {
             s_cts_time_callback(&cts_time);
         }
+        
+        ESP_LOGI(BLE_TAG, "CTS时间同步处理完成");
     } else {
-        ESP_LOGE(BLE_TAG, "Failed to parse CTS time data");
+        ESP_LOGE(BLE_TAG, "CTS时间数据解析失败");
     }
 }
 
@@ -109,6 +115,7 @@ static void ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t ga
         case ESP_GATTS_REG_EVT:
             if (param->reg.status == ESP_GATT_OK) {
                 s_ble_state = BLE_STATE_INITIALIZED;
+                s_gatts_if = gatts_if;  // 保存 gatts_if 供后续使用
                 
                 // 1. Create Bipupu Service
                 esp_gatt_srvc_id_t bipupu_service_id;
@@ -274,9 +281,8 @@ static void ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t ga
             conn_params.timeout = 400;
             esp_ble_gap_update_conn_params(&conn_params);
             
-            // 连接成功后自动触发时间同步（延迟1秒，确保连接稳定）
-            // 这里我们模拟从手机接收时间同步命令，实际应用中手机会主动发送
-            ESP_LOGI(BLE_TAG, "Connection established, waiting for time sync from mobile app");
+            // CTS时间同步服务已就绪，等待客户端发起时间同步
+            ESP_LOGI(BLE_TAG, "CTS time service ready, waiting for time synchronization");
             break;
 
         case ESP_GATTS_DISCONNECT_EVT:
@@ -433,6 +439,32 @@ uint32_t ble_manager_get_error_count(void)
     return s_error_count;
 }
 
+esp_err_t ble_manager_request_cts_time_sync(void)
+{
+    if (!s_ble_connected) {
+        ESP_LOGW(BLE_TAG, "无法请求时间同步：BLE未连接");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_cts_time_char_handle == 0) {
+        ESP_LOGW(BLE_TAG, "无法请求时间同步：CTS时间特征值未初始化");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(BLE_TAG, "CTS时间同步服务已就绪，等待手机应用发送时间数据...");
+    
+    // 重要：作为GATT服务器，我们不能主动请求时间同步
+    // 根据BLE CTS标准，时间同步的流程应该是：
+    // 1. 手机应用（客户端）发现我们的CTS服务
+    // 2. 手机应用主动写入当前时间到我们的CTS特征值
+    // 3. 我们作为服务器接收并处理这个时间数据
+    
+    // 这里我们只能记录状态，实际的时间数据接收在handle_cts_write()中处理
+    ESP_LOGI(BLE_TAG, "请确保手机应用支持CTS时间同步并主动发送时间数据");
+    
+    return ESP_OK;
+}
+
 void ble_manager_poll(void)
 {
     // 可以在这里添加周期性任务，如电量低警告等
@@ -448,8 +480,8 @@ void ble_manager_update_battery_level(uint8_t level)
         ESP_LOGI(BLE_TAG, "Battery level updated: %d%%", s_battery_level);
         
         // 发送电量通知（如果已连接并且特征值已配置通知）
-        if (s_ble_connected && s_battery_level_char_handle != 0) {
-            esp_err_t ret = esp_ble_gatts_send_indicate(s_battery_service_handle, s_conn_id,
+        if (s_ble_connected && s_battery_level_char_handle != 0 && s_gatts_if != 0) {
+            esp_err_t ret = esp_ble_gatts_send_indicate(s_gatts_if, s_conn_id,
                                                        s_battery_level_char_handle, 1, &s_battery_level, false);
             if (ret != ESP_OK) {
                 ESP_LOGE(BLE_TAG, "Failed to send battery notification: %s", esp_err_to_name(ret));

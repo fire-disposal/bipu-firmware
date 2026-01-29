@@ -40,6 +40,9 @@ static void ble_message_received(const char* sender, const char* message, const 
 }
 
 /* ===================== CTS 时间同步回调 ===================== */
+static bool s_cts_time_sync_completed = false;
+static uint32_t s_last_cts_sync_time = 0;
+
 static void ble_cts_time_received(const ble_cts_time_t* cts_time)
 {
     if (!cts_time) {
@@ -56,7 +59,10 @@ static void ble_cts_time_received(const ble_cts_time_t* cts_time)
                                   cts_time->hour, cts_time->minute, cts_time->second);
     if (ret == ESP_OK) {
         ESP_LOGI(APP_TAG, "RTC 已成功更新");
+        s_cts_time_sync_completed = true;
+        s_last_cts_sync_time = board_time_ms();
         board_notify();  // 提示用户时间已更新
+        
     } else {
         ESP_LOGE(APP_TAG, "RTC 更新失败: %s", esp_err_to_name(ret));
     }
@@ -130,9 +136,10 @@ void app_loop(void)
         ble_manager_update_battery_level(85); 
     }
 
-    // BLE 连接状态指示（蓝灯闪烁）
+    // BLE 连接状态指示（蓝灯闪烁）和时间同步管理
     static bool last_connected_state = false;
     static uint32_t connection_start_time = 0;
+    static uint32_t last_time_sync_attempt = 0;
     bool current_connected_state = ble_manager_is_connected();
     
     // 如果正在播放消息光效，跳过连接状态指示
@@ -143,8 +150,11 @@ void app_loop(void)
         
         if (current_connected_state) {
             if (!last_connected_state) {
-                // 刚连接上，记录时间
+                // 刚连接上，记录时间并重置时间同步状态
                 connection_start_time = board_time_ms();
+                s_cts_time_sync_completed = false;
+                last_time_sync_attempt = 0;
+                ESP_LOGI(APP_TAG, "BLE已连接，准备进行时间同步");
             }
             
             // 连接成功后只闪烁 3 秒
@@ -163,12 +173,42 @@ void app_loop(void)
                     last_blink_time = current_time;
                 }
             } else {
-                // 连接稳定后，关闭灯光
-                board_rgb_off();
+                // 连接稳定后，检查是否需要时间同步
+                if (!s_cts_time_sync_completed) {
+                    // 作为GATT服务器，我们等待客户端主动发送时间数据
+                    // 每5秒记录一次等待状态，但不主动请求
+                    if (board_time_ms() - last_time_sync_attempt > 5000) {
+                        last_time_sync_attempt = board_time_ms();
+                        ESP_LOGI(APP_TAG, "等待手机应用发送CTS时间数据...");
+                        ESP_LOGI(APP_TAG, "请确保手机应用支持CTS时间同步功能");
+                    }
+                    
+                    // 显示黄色指示灯表示等待时间同步
+                    static uint32_t last_sync_indicator_time = 0;
+                    if (board_time_ms() - last_sync_indicator_time > 1000) {
+                        board_rgb_set((board_rgb_t){255, 255, 0}); // 黄色
+                        last_sync_indicator_time = board_time_ms();
+                    }
+                } else {
+                    // 时间同步已完成，关闭灯光
+                    board_rgb_off();
+                    
+                    // 定期检查时间同步状态（每1小时检查一次）
+                    static uint32_t last_sync_check = 0;
+                    if (board_time_ms() - last_sync_check > 3600000) { // 1小时 = 3600000ms
+                        last_sync_check = board_time_ms();
+                        uint32_t seconds_since_sync = (board_time_ms() - s_last_cts_sync_time) / 1000;
+                        uint32_t hours = seconds_since_sync / 3600;
+                        uint32_t minutes = (seconds_since_sync % 3600) / 60;
+                        ESP_LOGI(APP_TAG, "时间同步状态正常，上次同步: %d小时%d分钟前", hours, minutes);
+                    }
+                }
             }
         } else if (last_connected_state) {
-            // 刚断开连接，关闭 RGB 灯
+            // 刚断开连接，关闭 RGB 灯并重置状态
             board_rgb_off();
+            s_cts_time_sync_completed = false;
+            ESP_LOGI(APP_TAG, "BLE已断开连接");
         }
     }
     last_connected_state = current_connected_state;
