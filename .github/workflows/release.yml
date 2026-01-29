@@ -12,7 +12,7 @@ jobs:
   build:
     name: Build & Release
     runs-on: ubuntu-latest
-    container: espressif/idf:latest
+    container: espressif/idf:v5.5.2
 
     steps:
       - name: Checkout Repo
