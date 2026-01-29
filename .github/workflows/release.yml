@@ -23,6 +23,7 @@ jobs:
       - name: Build Firmware
         shell: bash
         run: |
+          . $IDF_PATH/export.sh
           # 确保在正确的目录下编译
           idf.py set-target esp32s3
           idf.py build
@@ -30,6 +31,7 @@ jobs:
       - name: Merge Binaries
         shell: bash
         run: |
+          . $IDF_PATH/export.sh
           # 使用 esptool 合并固件
           # 地址: bootloader @ 0x0, partition-table @ 0x8000, app @ 0x10000
           esptool.py --chip esp32s3 merge_bin \
