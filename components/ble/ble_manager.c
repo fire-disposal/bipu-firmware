@@ -5,6 +5,7 @@
 #include "esp_gap_ble_api.h"
 #include "esp_gatts_api.h"
 #include "nvs_flash.h"
+#include "storage.h"
 #include <string.h>
 
 static const char* BLE_TAG = "ble_manager";
@@ -283,6 +284,12 @@ static void ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t ga
             
             // CTS时间同步服务已就绪，等待客户端发起时间同步
             ESP_LOGI(BLE_TAG, "CTS time service ready, waiting for time synchronization");
+            // 存储已连接设备地址以便记忆
+            char addr_str[32];
+            snprintf(addr_str, sizeof(addr_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+                     param->connect.remote_bda[0], param->connect.remote_bda[1], param->connect.remote_bda[2],
+                     param->connect.remote_bda[3], param->connect.remote_bda[4], param->connect.remote_bda[5]);
+            storage_save_ble_addr(addr_str);
             break;
 
         case ESP_GATTS_DISCONNECT_EVT:
@@ -332,6 +339,12 @@ static void ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t ga
 
 esp_err_t ble_manager_init(void)
 {
+    if (s_ble_state == BLE_STATE_ERROR) {
+        ESP_LOGW(BLE_TAG, "BLE处于错误状态，尝试重新初始化...");
+        ble_manager_deinit();
+        // 重置状态
+        s_ble_state = BLE_STATE_UNINITIALIZED;
+    }
     if (s_ble_state != BLE_STATE_UNINITIALIZED) return ESP_OK;
     
     s_ble_state = BLE_STATE_INITIALIZING;
@@ -375,13 +388,30 @@ esp_err_t ble_manager_init(void)
         .p_service_uuid = (uint8_t*)s_bipupu_service_uuid,
         .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
     };
-    esp_ble_gap_config_adv_data(&adv_data);
+    ret = esp_ble_gap_config_adv_data(&adv_data);
+    if (ret != ESP_OK) {
+        ble_handle_error("Config Advertising Data", ret);
+        return ret;
+    }
     
     return ESP_OK;
 }
 
 esp_err_t ble_manager_deinit(void)
 {
+    // Delete GATT services if they were created
+    if (s_bipupu_service_handle != 0) {
+        esp_ble_gatts_delete_service(s_bipupu_service_handle);
+        s_bipupu_service_handle = 0;
+    }
+    if (s_battery_service_handle != 0) {
+        esp_ble_gatts_delete_service(s_battery_service_handle);
+        s_battery_service_handle = 0;
+    }
+    if (s_cts_service_handle != 0) {
+        esp_ble_gatts_delete_service(s_cts_service_handle);
+        s_cts_service_handle = 0;
+    }
     // Simplified deinit
     esp_bluedroid_disable();
     esp_bluedroid_deinit();
@@ -439,31 +469,6 @@ uint32_t ble_manager_get_error_count(void)
     return s_error_count;
 }
 
-esp_err_t ble_manager_request_cts_time_sync(void)
-{
-    if (!s_ble_connected) {
-        ESP_LOGW(BLE_TAG, "无法请求时间同步：BLE未连接");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (s_cts_time_char_handle == 0) {
-        ESP_LOGW(BLE_TAG, "无法请求时间同步：CTS时间特征值未初始化");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    ESP_LOGI(BLE_TAG, "CTS时间同步服务已就绪，等待手机应用发送时间数据...");
-    
-    // 重要：作为GATT服务器，我们不能主动请求时间同步
-    // 根据BLE CTS标准，时间同步的流程应该是：
-    // 1. 手机应用（客户端）发现我们的CTS服务
-    // 2. 手机应用主动写入当前时间到我们的CTS特征值
-    // 3. 我们作为服务器接收并处理这个时间数据
-    
-    // 这里我们只能记录状态，实际的时间数据接收在handle_cts_write()中处理
-    ESP_LOGI(BLE_TAG, "请确保手机应用支持CTS时间同步并主动发送时间数据");
-    
-    return ESP_OK;
-}
 
 void ble_manager_poll(void)
 {

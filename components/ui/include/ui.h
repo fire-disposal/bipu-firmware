@@ -15,6 +15,7 @@ extern "C" {
 typedef enum {
     UI_STATE_STANDBY,      // 待机黑屏
     UI_STATE_MAIN,         // 主界面（时钟/状态）
+    UI_STATE_MESSAGE_LIST, // 消息列表
     UI_STATE_MESSAGE_READ, // 消息阅读
 } ui_state_enum_t;
 
@@ -37,12 +38,6 @@ void ui_show_message(const char* sender, const char* text);
 void ui_enter_standby(void);
 void ui_wake_up(void);
 
-void ui_enter_standby(void);
-
-/**
- * @brief 唤醒屏幕
- */
-void ui_wake_up(void);
 
 #ifdef __cplusplus
 }

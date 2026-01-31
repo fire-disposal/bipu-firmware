@@ -9,12 +9,19 @@
 #define ADC_UNIT               ADC_UNIT_1
 // ADC_CHANNEL 将动态获取
 #define ADC_ATTEN              ADC_ATTEN_DB_12 // 0-3.3V 量程
-#define VOLTAGE_DIVIDER_RATIO  2.0f  // 1/2 分压
+#define R_DIV_TOP_OHMS        511000.0f // 上分压电阻 (欧姆)
+#define R_DIV_BOTTOM_OHMS     511000.0f // 下分压电阻 (欧姆)
+// 电压还原系数: Vin = Vout * VOLTAGE_DIVIDER_RATIO
+#define VOLTAGE_DIVIDER_RATIO  ((R_DIV_TOP_OHMS + R_DIV_BOTTOM_OHMS) / R_DIV_BOTTOM_OHMS)
 
 // 充电检测参数
+// 当平滑电压变化超过阈值时，认为有上升/下降趋势（单位: V）
 #define CHARGING_VOLTAGE_THRESHOLD   0.05f  // 电压上升阈值 (50mV)
-#define CHARGING_STABLE_COUNT        3      // 连续检测次数
-#define VOLTAGE_HISTORY_SIZE         10     // 电压历史记录大小
+#define CHARGING_STABLE_COUNT        2      // 连续检测次数，减少判定所需样本以降低延迟
+// 降低采样频率以节省功耗与噪声影响
+#define BATTERY_CHECK_INTERVAL_MS    10000U // 10秒刷新一次
+// 指数平滑系数（EMA）用于滤掉瞬时噪声，范围(0,1], 越小越平滑
+#define BATTERY_SMOOTH_ALPHA         0.25f
 
 // 全局句柄
 static adc_oneshot_unit_handle_t s_adc1_handle;
@@ -23,9 +30,9 @@ static bool s_do_calibration = false;
 static adc_channel_t s_adc_channel;
 
 // 充电检测相关变量
-static float s_voltage_history[VOLTAGE_HISTORY_SIZE];
-static int s_voltage_history_index = 0;
-static int s_voltage_history_count = 0;
+static float s_smoothed_voltage = 0.0f;
+static float s_prev_smoothed_voltage = 0.0f;
+static bool s_smoothed_initialized = false;
 static bool s_is_charging = false;
 static int s_charging_detect_count = 0;
 static uint32_t s_last_voltage_check_time = 0;
@@ -95,13 +102,13 @@ void board_power_init(void)
 
     // 4. 校准初始化
     s_do_calibration = power_adc_calibration_init(unit, s_adc_channel, ADC_ATTEN, &s_adc_cali_handle);
+    // 打印分压信息以便调试（例如：511k/511k）
+    ESP_LOGI(BOARD_TAG, "Voltage divider: Rtop=%.0fR Rbot=%.0fR ratio=%.3f", R_DIV_TOP_OHMS, R_DIV_BOTTOM_OHMS, VOLTAGE_DIVIDER_RATIO);
     
-    // 5. 初始化充电检测相关变量
-    for (int i = 0; i < VOLTAGE_HISTORY_SIZE; i++) {
-        s_voltage_history[i] = 0.0f;
-    }
-    s_voltage_history_index = 0;
-    s_voltage_history_count = 0;
+    // 5. 初始化充电检测相关变量（使用EMA）
+    s_smoothed_voltage = 0.0f;
+    s_prev_smoothed_voltage = 0.0f;
+    s_smoothed_initialized = false;
     s_is_charging = false;
     s_charging_detect_count = 0;
     s_last_voltage_check_time = 0;
@@ -126,8 +133,8 @@ float board_battery_voltage(void)
         ESP_ERROR_CHECK(adc_cali_raw_to_voltage(s_adc_cali_handle, adc_raw, &voltage_mv));
     } else {
         // 无校准时的简易转换 (假设参考电压 1100mV, 12位精度)
-        // 注意：这里的公式可能只是近似值，使用校准最好
-        voltage_mv = (adc_raw * 2500) / 4095; // 假设默认参考电压
+        // 注意：这里的公式只是近似值，使用校准更可靠
+        voltage_mv = (adc_raw * 1100) / 4095; // 使用 ~1100mV 作为回退参考电压
     }
 
     // 还原分压前的电压 (mV -> V)
@@ -157,69 +164,36 @@ static void power_update_charging_detection(float current_voltage)
 {
     uint32_t current_time = board_time_ms();
     
-    // 限制检测频率，避免过于频繁的检测 (最小间隔1秒)
-    if (current_time - s_last_voltage_check_time < 1000) {
+    // 限制检测频率，避免过于频繁的检测
+    if (current_time - s_last_voltage_check_time < BATTERY_CHECK_INTERVAL_MS) {
         return;
     }
     s_last_voltage_check_time = current_time;
-    
-    // 记录电压到历史数组
-    s_voltage_history[s_voltage_history_index] = current_voltage;
-    s_voltage_history_index = (s_voltage_history_index + 1) % VOLTAGE_HISTORY_SIZE;
-    if (s_voltage_history_count < VOLTAGE_HISTORY_SIZE) {
-        s_voltage_history_count++;
-    }
-    
-    // 需要足够的历史数据才能进行有效判断
-    if (s_voltage_history_count < 3) {
+    // EMA 平滑
+    if (!s_smoothed_initialized) {
+        s_smoothed_voltage = current_voltage;
+        s_prev_smoothed_voltage = current_voltage;
+        s_smoothed_initialized = true;
         return;
     }
-    
-    // 计算最近几次电压的平均值
-    float recent_sum = 0.0f;
-    int recent_count = 0;
-    int start_index = s_voltage_history_index - 3;
-    if (start_index < 0) start_index += VOLTAGE_HISTORY_SIZE;
-    
-    for (int i = 0; i < 3; i++) {
-        int index = (start_index + i) % VOLTAGE_HISTORY_SIZE;
-        recent_sum += s_voltage_history[index];
-        recent_count++;
-    }
-    float recent_avg = recent_sum / recent_count;
-    
-    // 计算更早几次电压的平均值
-    float older_sum = 0.0f;
-    int older_count = 0;
-    int older_start = start_index - 3;
-    if (older_start < 0) older_start += VOLTAGE_HISTORY_SIZE;
-    
-    for (int i = 0; i < 3; i++) {
-        int index = (older_start + i) % VOLTAGE_HISTORY_SIZE;
-        if (s_voltage_history[index] > 0.0f) {  // 确保数据有效
-            older_sum += s_voltage_history[index];
-            older_count++;
+
+    s_prev_smoothed_voltage = s_smoothed_voltage;
+    s_smoothed_voltage = (1.0f - BATTERY_SMOOTH_ALPHA) * s_smoothed_voltage + BATTERY_SMOOTH_ALPHA * current_voltage;
+
+    float diff = s_smoothed_voltage - s_prev_smoothed_voltage;
+
+    if (diff > CHARGING_VOLTAGE_THRESHOLD) {
+        s_charging_detect_count++;
+        if (s_charging_detect_count >= CHARGING_STABLE_COUNT) {
+            s_is_charging = true;
         }
-    }
-    
-    if (older_count > 0) {
-        float older_avg = older_sum / older_count;
-        float voltage_diff = recent_avg - older_avg;
-        
-        // 检测电压是否持续上升
-        if (voltage_diff > CHARGING_VOLTAGE_THRESHOLD) {
-            s_charging_detect_count++;
-            if (s_charging_detect_count >= CHARGING_STABLE_COUNT) {
-                s_is_charging = true;
-            }
-        } else if (voltage_diff < -CHARGING_VOLTAGE_THRESHOLD) {
-            // 电压下降，可能停止充电
-            s_charging_detect_count = 0;
-            s_is_charging = false;
-        } else {
-            // 电压稳定，保持当前状态
-            // s_charging_detect_count 保持不变
-        }
+    } else if (diff < -CHARGING_VOLTAGE_THRESHOLD) {
+        if (s_charging_detect_count > 0) s_charging_detect_count--;
+        if (s_charging_detect_count == 0) s_is_charging = false;
+    } else {
+        // 无明显变化，逐步衰减计数以减少误判保留
+        if (s_charging_detect_count > 0) s_charging_detect_count--;
+        if (s_charging_detect_count == 0) s_is_charging = false;
     }
 }
 

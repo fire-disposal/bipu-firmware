@@ -2,12 +2,15 @@ idf_component_register(
     SRCS
         "ui.c"
         "ui_render.c"
+        "src/ui_status.c"
+        "src/ui_text.c"
         "src/ui_page_main.c"
+        "src/ui_page_list.c"
         "src/ui_page_message.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
-        board
+        board storage
     PRIV_REQUIRES
         ble
         u8g2

@@ -28,6 +28,9 @@ void board_display_begin(void);
 void board_display_end(void);
 void board_display_text(int x, int y, const char* text);
 void board_display_rect(int x, int y, int w, int h, bool fill);
+void board_display_glyph(int x, int y, uint16_t encoding);
+void board_display_set_font(const void* font);
+int board_display_text_width(const char* text);
 
 /* ================== 输入接口 ================== */
 board_key_t board_key_poll(void);

@@ -95,10 +95,25 @@ void board_display_text(int x, int y, const char *text) {
   }
 }
 
+void board_display_glyph(int x, int y, uint16_t encoding) {
+  u8g2_DrawGlyph(&s_u8g2, x, y, encoding);
+}
+
+void board_display_set_font(const void* font) {
+  if (font) {
+    u8g2_SetFont(&s_u8g2, (const uint8_t*)font);
+  }
+}
+
 void board_display_rect(int x, int y, int w, int h, bool fill) {
   if (fill) {
     u8g2_DrawBox(&s_u8g2, x, y, w, h);
   } else {
     u8g2_DrawFrame(&s_u8g2, x, y, w, h);
   }
+}
+
+int board_display_text_width(const char* text) {
+  if (!text) return 0;
+  return (int)u8g2_GetUTF8Width(&s_u8g2, (char*)text);
 }
