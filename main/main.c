@@ -9,12 +9,14 @@ static const char* MAIN_TAG = "main";
 
 /* ======================== 任务配置 ======================== */
 #define APP_TASK_STACK_SIZE      (12288)    // 支持 BLE 所需的额外栈空间
-#define APP_TASK_PRIORITY        (5)
+#define APP_TASK_PRIORITY        (10) // 逻辑必须硬实时
 #define APP_TASK_PERIOD_MS       (50)       // 20Hz 刷新频率
 #define APP_TASK_NAME            "app_task"
 
 #define VIBRATE_STARTUP_MS       (1000)
 #define STARTUP_RESTART_DELAY_MS (2000)
+
+// GUI 任务已移至 app 组件以保持模块划分清晰
 
 /* ===================== 应用主任务 ===================== */
 static void app_task(void* pvParameters)
@@ -74,44 +76,43 @@ void app_main(void)
     ESP_LOGI(MAIN_TAG, "==========================================");
     ESP_LOGI(MAIN_TAG, "启动 BIPI 应用 (FreeRTOS + U8G2 + BLE)");
     ESP_LOGI(MAIN_TAG, "==========================================");
-    
-    /* 步骤 1: 初始化 NVS（必须在BLE和其他模块前） */
-    if (init_nvs() != ESP_OK) {
-        ESP_LOGE(MAIN_TAG, "NVS 初始化失败，程序将在 2 秒后重启");
+
+    // 统一启动序列，按阶段初始化并可选重试/降级
+    esp_err_t err = ESP_OK;
+
+    // 步骤1: NVS
+    err = init_nvs();
+    if (err != ESP_OK) {
+        ESP_LOGE(MAIN_TAG, "NVS 初始化失败: %s", esp_err_to_name(err));
         vTaskDelay(pdMS_TO_TICKS(STARTUP_RESTART_DELAY_MS));
         esp_restart();
         return;
     }
-    
-    /* 步骤 2: 初始化硬件抽象层 */
-    esp_err_t ret = board_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(MAIN_TAG, "硬件初始化失败: %s，程序将在 2 秒后重启",
-                 esp_err_to_name(ret));
+
+    // 步骤2: 硬件初始化（board_init），尝试一次，如果失败则重试一次
+    err = board_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "board_init 失败: %s，重试一次...", esp_err_to_name(err));
+        vTaskDelay(pdMS_TO_TICKS(200));
+        err = board_init();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(MAIN_TAG, "硬件初始化失败: %s，程序将在 2 秒后重启", esp_err_to_name(err));
         vTaskDelay(pdMS_TO_TICKS(STARTUP_RESTART_DELAY_MS));
         esp_restart();
         return;
     }
     ESP_LOGI(MAIN_TAG, "硬件初始化成功");
-    
-    /* 步骤 3: 启动时震动反馈 */
-    ret = board_vibrate_on(VIBRATE_STARTUP_MS);
-    if (ret != ESP_OK) {
-        ESP_LOGW(MAIN_TAG, "震动反馈失败: %s", esp_err_to_name(ret));
+
+    // 步骤3: 应用层初始化（可降级：若 BLE 初始化失败，可继续运行但禁用相关功能）
+    err = app_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "应用初始化遇到问题: %s，继续启动但部分功能可能不可用", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(MAIN_TAG, "应用层初始化成功");
     }
-    
-    /* 步骤 4: 初始化应用层（包含BLE初始化） */
-    ret = app_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(MAIN_TAG, "应用初始化失败: %s，程序将在 2 秒后重启",
-                 esp_err_to_name(ret));
-        vTaskDelay(pdMS_TO_TICKS(STARTUP_RESTART_DELAY_MS));
-        esp_restart();
-        return;
-    }
-    ESP_LOGI(MAIN_TAG, "应用层初始化成功");
-    
-    /* 步骤 5: 创建应用主任务 */
+
+    // 步骤4: 创建应用主任务
     BaseType_t xReturned = xTaskCreate(
         app_task,
         APP_TASK_NAME,
@@ -120,15 +121,19 @@ void app_main(void)
         APP_TASK_PRIORITY,
         NULL
     );
-    
+
     if (xReturned != pdPASS) {
         ESP_LOGE(MAIN_TAG, "应用任务创建失败，程序将在 2 秒后重启");
         vTaskDelay(pdMS_TO_TICKS(STARTUP_RESTART_DELAY_MS));
         esp_restart();
         return;
     }
-    
+
+    // GUI 任务由 app 组件负责创建
+
     ESP_LOGI(MAIN_TAG, "==========================================");
     ESP_LOGI(MAIN_TAG, "BIPI 应用启动成功！");
     ESP_LOGI(MAIN_TAG, "==========================================");
 }
+
+/* GUI task moved into app component (app.c) */

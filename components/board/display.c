@@ -31,11 +31,41 @@ static uint8_t u8g2_esp32_i2c_byte_cb(u8x8_t *u8x8, uint8_t msg,
   case U8X8_MSG_BYTE_END_TRANSFER: {
     if (display_dev_handle == NULL) return 0;
     
-    esp_err_t ret = i2c_master_transmit(display_dev_handle, buffer, buf_idx, -1);
+    // 小延时以避免快速连续传输
+    vTaskDelay(pdMS_TO_TICKS(1));
+
+    static int i2c_fail_streak = 0;
+    esp_err_t ret = ESP_OK;
+
+    // 尝试多次传输以提升鲁棒性（快速超时）
+    const int max_attempts = 3;
+    for (int attempt = 0; attempt < max_attempts; attempt++) {
+      // 使用较短超时（10ms）以避免长时间阻塞主逻辑
+      ret = i2c_master_transmit(display_dev_handle, buffer, buf_idx, pdMS_TO_TICKS(10));
+      if (ret == ESP_OK) break;
+      ESP_LOGW(BOARD_TAG, "I2C transmit attempt %d failed: %d", attempt + 1, ret);
+      // 小间隔后重试
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
 
     if (ret != ESP_OK) {
-      ESP_LOGE(BOARD_TAG, "I2C transfer failed: %d", ret);
+      ESP_LOGE(BOARD_TAG, "I2C transfer failed after %d attempts: %d (len=%d)", max_attempts, ret, buf_idx);
+
+      // 增强恢复：对连续失败进行计数，超过阈值尝试重置 I2C 总线
+      i2c_fail_streak++;
+      if (i2c_fail_streak > 5) {
+        ESP_LOGW(BOARD_TAG, "I2C fail streak >5, attempting bus reset");
+        // 尝试软件复位 bus（驱动会重新初始化硬件控制器）
+        i2c_master_bus_reset(board_i2c_bus_handle);
+        // 给总线一点时间恢复
+        vTaskDelay(pdMS_TO_TICKS(100));
+        i2c_fail_streak = 0;
+      }
+
       return 0;
+    } else {
+      // 成功则清零连续失败计数
+      i2c_fail_streak = 0;
     }
     break;
   }
