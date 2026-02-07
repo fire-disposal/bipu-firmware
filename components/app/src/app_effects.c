@@ -12,10 +12,12 @@ void app_effects_apply(const ble_effect_t* effect)
     if (effect->duration_ms == 0) return;
 
     esp_log_level_set(TAG, ESP_LOG_INFO);
-    board_rgb_t color = { .r = effect->r, .g = effect->g, .b = effect->b };
-    if (color.r == 0 && color.g == 0 && color.b == 0) return;
+    // 保留蓝牙协议消息结构，但不执行实际 LED 播放（硬件已改为白光灯）
+    ESP_LOGI(TAG, "Received message effect r=%d g=%d b=%d duration=%dms (playback suppressed)",
+             effect->r, effect->g, effect->b, effect->duration_ms);
+    if (effect->r == 0 && effect->g == 0 && effect->b == 0) return;
 
-    board_rgb_set(color);
+    // 仅记录播放时长以便上层查询/避让，但不实际点亮
     s_message_effect_end_time = board_time_ms() + (uint32_t)effect->duration_ms;
 }
 
@@ -25,7 +27,7 @@ void app_effects_tick(void)
     uint32_t now = board_time_ms();
     if (now >= s_message_effect_end_time) {
         s_message_effect_end_time = 0;
-        board_rgb_off();
+        board_leds_off();
     }
 }
 

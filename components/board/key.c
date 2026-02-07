@@ -1,5 +1,5 @@
 #include "board.h"
-#include "board_private.h"
+#include "board_hal.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 

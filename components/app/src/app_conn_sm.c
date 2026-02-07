@@ -39,7 +39,7 @@ void app_conn_sm_tick(bool is_connected)
         case CONN_STATE_CONNECTED_INIT:
             if (!is_connected) {
                 s_conn_sm.state = CONN_STATE_DISCONNECTED;
-                board_rgb_off();
+                board_leds_off();
                 ESP_LOGI(TAG, "连接在闪烁阶段中断，回到断开状态");
                 break;
             }
@@ -47,10 +47,10 @@ void app_conn_sm_tick(bool is_connected)
             if (now - s_conn_sm.connection_start_time < 3000U) {
                 if (now - s_conn_sm.last_blink_time > 200U) {
                     if (s_conn_sm.led_state) {
-                        board_rgb_set((board_rgb_t){0, 0, 255});
-                    } else {
-                        board_rgb_off();
-                    }
+                            board_leds_set((board_leds_t){ .led1 = 0, .led2 = 0, .led3 = 255 });
+                        } else {
+                            board_leds_off();
+                        }
                     s_conn_sm.led_state = !s_conn_sm.led_state;
                     s_conn_sm.last_blink_time = now;
                 }
@@ -63,13 +63,13 @@ void app_conn_sm_tick(bool is_connected)
         case CONN_STATE_CONNECTED_STABLE:
             if (!is_connected) {
                 s_conn_sm.state = CONN_STATE_DISCONNECTED;
-                board_rgb_off();
+                board_leds_off();
                 ESP_LOGI(TAG, "BLE已断开连接");
                 break;
             }
 
             // 连接稳定：不管理时间同步状态，也不额外操作 LED
-            board_rgb_off();
+            board_leds_off();
             break;
     }
 }

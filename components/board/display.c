@@ -1,5 +1,5 @@
 #include "board.h"
-#include "board_private.h"
+#include "board_hal.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "u8g2.h"

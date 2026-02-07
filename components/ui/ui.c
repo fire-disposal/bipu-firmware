@@ -182,7 +182,7 @@ void ui_enter_standby(void) {
     if (s_ui.state != UI_STATE_STANDBY) {
         s_ui.state = UI_STATE_STANDBY;
         ui_render_standby();
-        board_rgb_off();
+        board_leds_off();
         ESP_LOGI(UI_TAG, "Entered standby");
     }
 }

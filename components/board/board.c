@@ -1,5 +1,5 @@
 #include "board.h"
-#include "board_private.h"
+#include "board_hal.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -19,8 +19,8 @@ esp_err_t board_init(void) {
   board_i2c_init();
 
   // 2. 独立外设初始化
-  board_vibrate_init(); // 包含GPIO初始化
-  board_rgb_init();     // 包含GPIO初始化
+    board_vibrate_init(); // 包含GPIO初始化
+    board_leds_init();     // 包含GPIO初始化（原 RGB）
   board_key_init();     // 包含GPIO初始化
   board_power_init();   // 电池ADC初始化
 
@@ -105,8 +105,8 @@ esp_err_t board_set_rtc_from_timestamp(time_t timestamp) {
 
 /* ================== 反馈接口实现 ================== */
 void board_notify(void) {
-  // 震动提醒 (RGB灯由调用者管理，避免覆盖自定义光效)
+    // 震动提醒 (LED 灯由调用者管理，避免覆盖自定义光效)
   board_vibrate_on(100); // 震动100ms
-  // board_rgb_set(BOARD_COLOR_BLUE); // 已移除，防止覆盖消息光效
+    // board_rgb_set(BOARD_COLOR_BLUE); // 已移除，防止覆盖消息光效
   ESP_LOGI(BOARD_TAG, "Notification triggered");
 }

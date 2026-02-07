@@ -81,8 +81,10 @@ void app_loop(void)
 
     // 各模块的定期/短时处理
     app_effects_tick();
-    // effects 优先：如果 effect 在播放，可选择跳过 conn tick，但 conn tick 内也不再干扰灯光
-    app_conn_sm_tick(ble_manager_is_connected());
+    // effects 优先：如果 effect 在播放，跳过 conn tick 以避免覆盖效果
+    if (!app_effects_is_active()) {
+        app_conn_sm_tick(ble_manager_is_connected());
+    }
     app_battery_tick();
 }
 
@@ -103,8 +105,8 @@ void app_cleanup(void)
         ESP_LOGW(APP_TAG, "震动马达关闭失败: %s", esp_err_to_name(ret));
     }
     
-    // 关闭 RGB 灯
-    board_rgb_off();
+    // 关闭 LED 灯
+    board_leds_off();
     
     ESP_LOGI(APP_TAG, "应用层清理完成");
 }

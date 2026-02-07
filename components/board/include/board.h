@@ -13,12 +13,12 @@ typedef enum {
     BOARD_KEY_BACK,
 } board_key_t;
 
-/* RGB颜色定义 */
+/* 三个独立白光 LED 定义 (替代原 RGB 语义) */
 typedef struct {
-    uint8_t r;
-    uint8_t g;
-    uint8_t b;
-} board_rgb_t;
+    uint8_t led1; // 原 R 通道
+    uint8_t led2; // 原 G 通道 (注意: 可能为 strapping pin)
+    uint8_t led3; // 原 B 通道
+} board_leds_t;
 
 /* ================== 生命周期 ================== */
 esp_err_t board_init(void);
@@ -69,10 +69,10 @@ esp_err_t board_vibrate_on(uint32_t ms);
 esp_err_t board_vibrate_off(void);
 void board_vibrate_tick(void);  // 需要在主循环中调用
 
-/* ================== RGB灯接口 ================== */
-void board_rgb_init(void);
-void board_rgb_set(board_rgb_t color);
-void board_rgb_off(void);
+/* ================== 三个独立白光 LED 接口 ================== */
+void board_leds_init(void);
+void board_leds_set(board_leds_t leds);
+void board_leds_off(void);
 
 /* ================== 电源管理接口 ================== */
 float board_battery_voltage(void);

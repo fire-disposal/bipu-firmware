@@ -1,5 +1,5 @@
 #include "board.h"
-#include "board_private.h"
+#include "board_hal.h"
 #include "esp_log.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
