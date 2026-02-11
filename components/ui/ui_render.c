@@ -58,34 +58,6 @@ void ui_render_main(int message_count, int unread_count) {
     ui_draw_text_centered(0, 35, 128, "BIPI PAGER");
   }
 
-  // 底部状态区域
-  int y_bottom = 63;
-  board_display_set_font(u8g2_font_wqy12_t_gb2312a);
-  
-  // 左侧：消息计数
-  if (message_count > 0) {
-    board_display_set_font(u8g2_font_open_iconic_email_1x_t);
-    board_display_glyph(2, y_bottom - 3, ICON_EMAIL_1X);
-    board_display_set_font(u8g2_font_wqy12_t_gb2312a);
-    
-    char msg_info[32];
-    if (unread_count > 0) {
-      snprintf(msg_info, sizeof(msg_info), "%d新", unread_count);
-    } else {
-      snprintf(msg_info, sizeof(msg_info), "%d条", message_count);
-    }
-    board_display_text(14, y_bottom, msg_info);
-  } else {
-    board_display_text(2, y_bottom, "无消息");
-  }
-  
-  // 右侧：手电筒状态
-  if (ui_is_flashlight_on()) {
-    board_display_set_font(u8g2_font_open_iconic_thing_1x_t);
-    board_display_glyph(112, y_bottom - 3, 0x4E); // 灯泡图标
-    board_display_set_font(u8g2_font_wqy12_t_gb2312a);
-  }
-
   board_display_end();
 }
 

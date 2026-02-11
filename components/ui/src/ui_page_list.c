@@ -12,7 +12,7 @@
 static const char* TAG = "PAGE_LIST";
 
 // 每页显示项数（根据屏幕高度与行高调整）
-#define ITEMS_PER_PAGE 3
+#define ITEMS_PER_PAGE 4
 #define LINE_HEIGHT 12
 #define STATUS_BAR_Y 10
 #define CONTENT_START_Y 24
@@ -127,16 +127,6 @@ static void render_list_page(int selected_idx) {
         y += LINE_HEIGHT;
     }
     
-    // 底部操作提示（用小字体）
-    board_display_rect(0, 52, 128, 1, true);
-    board_display_set_font(u8g2_font_5x8_tr);
-    if (s_delete_mode) {
-        ui_draw_text_centered(0, 63, 128, "OK delete  BK cancel");
-    } else {
-        ui_draw_text_centered(0, 63, 128, "OK open  UP/DN sel  BK back");
-    }
-    board_display_set_font(u8g2_font_wqy12_t_gb2312a);
-
     board_display_end();
 }
 

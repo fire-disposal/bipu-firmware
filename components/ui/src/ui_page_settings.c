@@ -57,10 +57,6 @@ static void render_about(void) {
     board_display_text(4, 26, "BIPI Pager v1.0");
     board_display_text(4, 40, "ESP32-C3 BLE");
     
-    // 底部提示
-    board_display_rect(0, 52, 128, 1, true);
-    ui_draw_text_centered(0, 63, 128, "按任意键返回");
-    
     board_display_end();
 }
 
@@ -129,16 +125,6 @@ static void render_settings(void) {
             board_display_set_font_mode(0);
         }
     }
-    
-    // 底部操作提示（用小字体）
-    board_display_rect(0, 52, 128, 1, true);
-    board_display_set_font(u8g2_font_5x8_tr);
-    if (s_editing) {
-        ui_draw_text_centered(0, 63, 128, "UP/DN adj  OK/BK done");
-    } else {
-        ui_draw_text_centered(0, 63, 128, "UP/DN sel  OK enter  BK back");
-    }
-    board_display_set_font(u8g2_font_wqy12_t_gb2312a);
     
     board_display_end();
 }

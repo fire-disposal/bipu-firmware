@@ -108,7 +108,7 @@ static void render_message(const ui_message_t* msg, int current_idx, int total_c
     const int left = 2;
     const int right = 4;
     const int area_width = 128 - left - right;
-    const int visible_height = 64 - CONTENT_START_Y - 2;
+    const int visible_height = 64 - CONTENT_START_Y;
     
     // 计算内容高度
     s_content_height = calculate_content_height(msg->text, area_width);
@@ -221,7 +221,7 @@ static void on_key(board_key_t key) {
     ESP_LOGD(TAG, "Message page key: %d, idx: %d/%d, scroll: %d", key, idx, count, s_vertical_offset);
 
     // 计算最大滚动量
-    const int visible_height = 64 - CONTENT_START_Y - 2;
+    const int visible_height = 64 - CONTENT_START_Y;
     int max_scroll = s_content_height - visible_height;
     if (max_scroll < 0) max_scroll = 0;
 
