@@ -1,3 +1,13 @@
+/**
+ * @file ble_config.h
+ * @brief BLE 配置常量和 UUID 定义 (NimBLE 版本)
+ * 
+ * 本文件定义了 BLE 服务的所有配置参数，包括：
+ * - Nordic UART Service (NUS) UUID
+ * - Battery Service UUID
+ * - Current Time Service (CTS) UUID
+ */
+
 #pragma once
 
 #include <stdint.h>
@@ -6,35 +16,53 @@
 extern "C" {
 #endif
 
-/* ================== BLE配置常量 ================== */
-#define BLE_DEVICE_NAME           "BIPUPU——test1"
-#define BLE_MAX_MESSAGE_LEN       128
-#define BLE_ADV_INTERVAL_MIN      0x20
-#define BLE_ADV_INTERVAL_MAX      0x40
+/* ================== 设备配置 ================== */
+#define BLE_DEVICE_NAME           "BIPUPU"
+#define BLE_MAX_MESSAGE_LEN       512       // 支持较长消息（分块传输）
+#define BLE_MTU_SIZE              247       // 请求的 MTU 大小
+#define BLE_CHUNK_SIZE            20        // 默认分块大小 (MTU-3)
 
-/* ================== UUID 定义 ================== */
-// Bipupu Service: 6E400001-B5A3-F393-E0A9-E50E24DCCA9E
-#define BIPUPU_SERVICE_UUID_128   {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x01, 0x00, 0x40, 0x6E}
-// Command Input: 6E400003-B5A3-F393-E0A9-E50E24DCCA9E
-#define BIPUPU_CHAR_CMD_UUID_128  {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40, 0x6E}
-// Status Output: 6E400004-B5A3-F393-E0A9-E50E24DCCA9E
-#define BIPUPU_CHAR_STATUS_UUID_128 {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x04, 0x00, 0x40, 0x6E}
+/* ================== 广播参数 ================== */
+#define BLE_ADV_INTERVAL_MIN      0xA0      // 100ms
+#define BLE_ADV_INTERVAL_MAX      0xF0      // 150ms
 
-// Battery Service: 0x180F
+/* ================== 连接参数 ================== */
+#define BLE_CONN_INT_MIN          0x18      // 30ms
+#define BLE_CONN_INT_MAX          0x30      // 60ms
+#define BLE_CONN_LATENCY          4         // 可跳过4个间隔再响应，降低射频活动
+#define BLE_CONN_TIMEOUT          400       // 4s
+
+/* ================== Nordic UART Service (NUS) UUID ================== */
+// 服务 UUID: 6E400001-B5A3-F393-E0A9-E50E24DCCA9E
+#define NUS_SERVICE_UUID_128      {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, \
+                                   0x93, 0xF3, 0xA3, 0xB5, 0x01, 0x00, 0x40, 0x6E}
+
+// TX 特征 (手机写入): 6E400002-B5A3-F393-E0A9-E50E24DCCA9E
+#define NUS_CHAR_TX_UUID_128      {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, \
+                                   0x93, 0xF3, 0xA3, 0xB5, 0x02, 0x00, 0x40, 0x6E}
+
+// RX 特征 (设备发送): 6E400003-B5A3-F393-E0A9-E50E24DCCA9E
+#define NUS_CHAR_RX_UUID_128      {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, \
+                                   0x93, 0xF3, 0xA3, 0xB5, 0x03, 0x00, 0x40, 0x6E}
+
+// NimBLE 使用字符串格式的 UUID
+#define NUS_SERVICE_UUID_STR      "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define NUS_CHAR_TX_UUID_STR      "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define NUS_CHAR_RX_UUID_STR      "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+
+/* ================== Battery Service (标准 BLE 服务) ================== */
+// 服务 UUID: 0x180F
 #define BATTERY_SERVICE_UUID      0x180F
-// Battery Level: 0x2A19
+// Battery Level 特征: 0x2A19
 #define BATTERY_LEVEL_UUID        0x2A19
 
-// Current Time Service (CTS): 0x1805
+/* ================== Current Time Service (CTS, 标准 BLE 服务) ================== */
+// 服务 UUID: 0x1805
 #define CTS_SERVICE_UUID          0x1805
-// Current Time: 0x2A2B (读写，用于接收时间更新)
+// Current Time 特征: 0x2A2B
 #define CTS_CURRENT_TIME_UUID     0x2A2B
-// Local Time Info: 0x2A0F (可选，用于时区信息)
+// Local Time Info 特征: 0x2A0F (可选)
 #define CTS_LOCAL_TIME_INFO_UUID  0x2A0F
-
-/* ================== 协议配置 ================== */
-#define PROTOCOL_VERSION          0x01
-#define CMD_TYPE_MESSAGE          0x01
 
 #ifdef __cplusplus
 }

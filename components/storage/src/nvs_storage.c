@@ -149,3 +149,34 @@ esp_err_t storage_load_ble_addr(char* buf, size_t buf_len) {
     nvs_close(h);
     return err;
 }
+
+esp_err_t storage_save_brightness(uint8_t brightness) {
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u8(h, "brightness", brightness);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TAG, "Brightness saved: %d", brightness);
+    return err;
+}
+
+esp_err_t storage_load_brightness(uint8_t* out_brightness) {
+    if (!out_brightness) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        if (err == ESP_ERR_NVS_NOT_FOUND) {
+            *out_brightness = 100; // 默认亮度
+            return ESP_OK;
+        }
+        return err;
+    }
+    err = nvs_get_u8(h, "brightness", out_brightness);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        *out_brightness = 100; // 默认亮度
+        err = ESP_OK;
+    }
+    nvs_close(h);
+    return err;
+}

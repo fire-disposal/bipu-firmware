@@ -1,29 +1,26 @@
+/**
+ * @file ble_battery_service.h
+ * @brief Battery Service 接口定义 (原生 NimBLE 版本)
+ * 
+ * 标准 BLE Battery Service (UUID: 0x180F)
+ */
+
 #pragma once
 
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
-#include "esp_gatts_api.h"
-#include "esp_bt_defs.h"
 #include "ble_config.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* 电池服务句柄 */
-typedef struct {
-    uint16_t service_handle;
-    uint16_t level_char_handle;
-} ble_battery_service_handles_t;
-
 /**
- * @brief 初始化电池服务
- * @param gatts_if GATT 接口
- * @param handles 输出服务句柄
- * @return ESP_OK 成功，其他值表示错误
+ * @brief 初始化电池服务 (原生 NimBLE 版本)
+ * @return 0 成功，其他值表示错误
  */
-esp_err_t ble_battery_service_init(esp_gatt_if_t gatts_if, ble_battery_service_handles_t* handles);
+int ble_battery_service_init(void);
 
 /**
  * @brief 反初始化电池服务
@@ -37,12 +34,16 @@ void ble_battery_service_deinit(void);
 void ble_battery_service_update_level(uint8_t level);
 
 /**
- * @brief 处理电池服务的事件
- * @param event 事件类型
- * @param gatts_if GATT 接口
- * @param param 事件参数
+ * @brief 设置连接句柄
+ * @param conn_handle 连接句柄
  */
-void ble_battery_service_handle_event(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param);
+void ble_battery_service_set_conn_handle(uint16_t conn_handle);
+
+/**
+ * @brief 获取 Battery Level 特征值句柄
+ * @return 特征值句柄
+ */
+uint16_t ble_battery_service_get_level_handle(void);
 
 #ifdef __cplusplus
 }

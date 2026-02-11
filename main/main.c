@@ -1,4 +1,5 @@
 #include "board.h"
+#include "board_hal.h"
 #include "app.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -8,8 +9,10 @@
 static const char* MAIN_TAG = "main";
 
 /* ======================== 任务配置 ======================== */
-#define APP_TASK_STACK_SIZE      (12288)    // 支持 BLE 所需的额外栈空间
-#define APP_TASK_PRIORITY        (10) // 逻辑必须硬实时
+// 任务栈大小：支持 BLE 栈 + 日志缓冲
+#define APP_TASK_STACK_SIZE      (8192)
+// 任务优先级：中等优先级，低于 ESP 内部任务但高于 IDLE
+#define APP_TASK_PRIORITY        (5)
 #define APP_TASK_PERIOD_MS       (50)       // 20Hz 刷新频率
 #define APP_TASK_NAME            "app_task"
 
@@ -21,32 +24,19 @@ static const char* MAIN_TAG = "main";
 /* ===================== 应用主任务 ===================== */
 static void app_task(void* pvParameters)
 {
-    ESP_LOGI(MAIN_TAG, "应用任务已启动 (栈: %u 字节, 优先级: %u)",
-             APP_TASK_STACK_SIZE, APP_TASK_PRIORITY);
+    (void)pvParameters;
+    
+    ESP_LOGI(MAIN_TAG, "应用任务已启动 (栈: %u 字节, 优先级: %u, 周期: %ums)",
+             APP_TASK_STACK_SIZE, APP_TASK_PRIORITY, APP_TASK_PERIOD_MS);
     
     TickType_t last_wake_time = xTaskGetTickCount();
-    uint32_t loop_count = 0;
-    uint32_t last_log_time = 0;
     
     while (1) {
         // 执行应用主循环（非阻塞）
         app_loop();
         
-        // 使用 vTaskDelayUntil 保证周期执行，避免延迟累积
-        if (xTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(APP_TASK_PERIOD_MS)) == pdFAIL) {
-            ESP_LOGW(MAIN_TAG, "任务周期延迟过大 (循环: %lu)", loop_count);
-        }
-        
-        // 每 100 次循环输出一次监控日志（约5秒）
-        if (++loop_count % 100 == 0) {
-            uint32_t current_time = xTaskGetTickCount();
-            if (current_time - last_log_time > pdMS_TO_TICKS(5000)) {
-                UBaseType_t stack_high_water = uxTaskGetStackHighWaterMark(NULL);
-                ESP_LOGD(MAIN_TAG, "循环: %lu, 栈剩余: %u bytes", 
-                         loop_count, stack_high_water * 4);
-                last_log_time = current_time;
-            }
-        }
+        // 使用 vTaskDelayUntil 保证周期执行
+        vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(APP_TASK_PERIOD_MS));
     }
 }
 
@@ -112,14 +102,15 @@ void app_main(void)
         ESP_LOGI(MAIN_TAG, "应用层初始化成功");
     }
 
-    // 步骤4: 创建应用主任务
-    BaseType_t xReturned = xTaskCreate(
+    // 步骤4: 创建应用主任务（双核芯片绑 Core 1 避让 BLE，单核芯片绑 Core 0）
+    BaseType_t xReturned = xTaskCreatePinnedToCore(
         app_task,
         APP_TASK_NAME,
         APP_TASK_STACK_SIZE,
         NULL,
         APP_TASK_PRIORITY,
-        NULL
+        NULL,
+        BOARD_APP_CPU
     );
 
     if (xReturned != pdPASS) {

@@ -31,9 +31,15 @@ void board_display_rect(int x, int y, int w, int h, bool fill);
 void board_display_glyph(int x, int y, uint16_t encoding);
 void board_display_set_font(const void* font);
 int board_display_text_width(const char* text);
+void board_display_set_contrast(uint8_t contrast);  // OLED亮度/对比度控制
+void board_display_set_draw_color(uint8_t color);   // 0=黑 1=白 2=XOR
+void board_display_set_font_mode(uint8_t mode);     // 0=实心 1=透明
 
 /* ================== 输入接口 ================== */
 board_key_t board_key_poll(void);
+bool board_key_is_pressed(board_key_t key);      // 检查按键是否正被按下
+bool board_key_is_long_pressed(board_key_t key); // 检查是否长按中
+uint32_t board_key_press_duration(board_key_t key); // 获取按下持续时间(ms)
 
 /* ================== 时间接口 ================== */
 uint32_t board_time_ms(void);

@@ -1,230 +1,477 @@
-#include "esp_bt.h"
-#include "esp_bt_main.h"
-#include "esp_gap_ble_api.h"
-#include "esp_gatts_api.h"
+/**
+ * @file ble_manager.c
+ * @brief BLE 管理器实现 (原生 NimBLE 版本)
+ * 
+ * 使用原生 NimBLE API 管理 BLE 栈和所有 GATT 服务：
+ * - Nordic UART Service (NUS): 消息通信
+ * - Battery Service: 电池电量
+ * - Current Time Service (CTS): 时间同步
+ */
+
+#include "ble_manager.h"
+#include "ble_nus_service.h"
+#include "ble_battery_service.h"
+#include "ble_cts_service.h"
+#include "ble_protocol.h"
+
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "host/ble_hs.h"
+#include "host/util/util.h"
+#include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
+
 #include "esp_log.h"
+#include "esp_nimble_hci.h"
 #include "nvs_flash.h"
 #include "storage.h"
 #include <string.h>
 
-#include "ble_manager.h"
-#include "ble_bipupu_service.h"
-#include "ble_battery_service.h"
-#include "ble_cts_service.h"
+static const char* TAG = "ble_manager";
 
-static const char* BLE_TAG = "ble_manager";
-
-/* ================== 私有状态管理 ================== */
+/* ================== 私有状态 ================== */
 static ble_state_t s_ble_state = BLE_STATE_UNINITIALIZED;
 static bool s_ble_connected = false;
+static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+static uint32_t s_error_count = 0;
+static uint8_t s_own_addr_type;
+
+// 回调函数
 static ble_message_callback_t s_message_callback = NULL;
 static ble_cts_time_callback_t s_cts_time_callback = NULL;
-static uint16_t s_conn_id = 0xFFFF;
-static uint32_t s_error_count = 0;
-static esp_gatt_if_t s_gatts_if = 0;
 
-// Service handles
-static ble_bipupu_service_handles_t s_bipupu_handles = {0};
-static ble_battery_service_handles_t s_battery_handles = {0};
-static ble_cts_service_handles_t s_cts_handles = {0};
+/* ================== 前向声明 ================== */
+static void ble_host_task(void *param);
+static void ble_on_reset(int reason);
+static void ble_on_sync(void);
+static int ble_gap_event(struct ble_gap_event *event, void *arg);
+static void ble_advertise(void);
 
-// UUID for advertising
-static const uint8_t s_bipupu_service_uuid[16] = BIPUPU_SERVICE_UUID_128;
+/* ================== NUS 消息回调适配 ================== */
+
+/**
+ * @brief NUS 消息回调，将原始文本转换为解析后的消息
+ */
+static void nus_message_handler(const char* message, uint16_t len)
+{
+    if (!s_message_callback || !message) return;
+
+    ble_parsed_msg_t parsed;
+    if (ble_protocol_parse_text(message, len, &parsed)) {
+        s_message_callback(parsed.sender, parsed.message, &parsed.effect);
+    }
+}
 
 /* ================== 辅助函数 ================== */
-static void ble_handle_error(const char* operation, esp_err_t error)
+
+static void ble_handle_error(const char* operation, int error)
 {
     s_error_count++;
     s_ble_state = BLE_STATE_ERROR;
-    ESP_LOGE(BLE_TAG, "BLE错误 - 操作: %s, 错误码: %s (0x%x)",
-             operation, esp_err_to_name(error), error);
+    ESP_LOGE(TAG, "BLE error - Operation: %s, Code: %d", operation, error);
 }
 
 const char* ble_manager_state_to_string(ble_state_t state)
 {
     switch (state) {
-        case BLE_STATE_UNINITIALIZED: return "未初始化";
-        case BLE_STATE_INITIALIZING:  return "初始化中";
-        case BLE_STATE_INITIALIZED:   return "已初始化";
-        case BLE_STATE_ADVERTISING:   return "广播中";
-        case BLE_STATE_CONNECTED:     return "已连接";
-        case BLE_STATE_ERROR:         return "错误状态";
-        default: return "未知状态";
+        case BLE_STATE_UNINITIALIZED: return "Uninitialized";
+        case BLE_STATE_INITIALIZING:  return "Initializing";
+        case BLE_STATE_INITIALIZED:   return "Initialized";
+        case BLE_STATE_ADVERTISING:   return "Advertising";
+        case BLE_STATE_CONNECTED:     return "Connected";
+        case BLE_STATE_ERROR:         return "Error";
+        default: return "Unknown";
     }
 }
 
-/* ================== BLE事件处理回调 ================== */
-static void ble_gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, 
-                                     esp_ble_gatts_cb_param_t *param)
+/**
+ * @brief 打印设备地址
+ */
+static void print_addr(const void *addr)
 {
-    esp_err_t ret;
-    switch (event) {
-        case ESP_GATTS_REG_EVT:
-            if (param->reg.status == ESP_GATT_OK) {
-                s_ble_state = BLE_STATE_INITIALIZED;
-                s_gatts_if = gatts_if;
+    const uint8_t *u8p = addr;
+    ESP_LOGI(TAG, "Device address: %02x:%02x:%02x:%02x:%02x:%02x",
+             u8p[5], u8p[4], u8p[3], u8p[2], u8p[1], u8p[0]);
+}
 
-                // Initialize services
-                ret = ble_bipupu_service_init(gatts_if, &s_bipupu_handles);
-                if (ret != ESP_OK) ble_handle_error("Init Bipupu Service", ret);
+/* ================== GAP 事件处理 ================== */
 
-                ret = ble_battery_service_init(gatts_if, &s_battery_handles);
-                if (ret != ESP_OK) ble_handle_error("Init Battery Service", ret);
+static int ble_gap_event(struct ble_gap_event *event, void *arg)
+{
+    struct ble_gap_conn_desc desc;
+    int rc;
 
-                ret = ble_cts_service_init(gatts_if, &s_cts_handles);
-                if (ret != ESP_OK) ble_handle_error("Init CTS Service", ret);
-
-            } else {
-                ble_handle_error("GATT Register", ESP_FAIL);
-            }
-            break;
-
-        case ESP_GATTS_START_EVT:
-            if (param->start.status == ESP_GATT_OK && param->start.service_handle == s_bipupu_handles.service_handle) {
-                ble_manager_start_advertising();
-            }
-            break;
-
-        case ESP_GATTS_CONNECT_EVT:
+    switch (event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        ESP_LOGI(TAG, "Connection %s; status=%d",
+                 event->connect.status == 0 ? "established" : "failed",
+                 event->connect.status);
+        
+        if (event->connect.status == 0) {
             s_ble_connected = true;
-            s_conn_id = param->connect.conn_id;
+            s_conn_handle = event->connect.conn_handle;
             s_ble_state = BLE_STATE_CONNECTED;
-            ESP_LOGI(BLE_TAG, "Device connected, conn_id=%d", s_conn_id);
             
-            // Update connection params if needed
-            esp_ble_conn_update_params_t conn_params = {0};
-            memcpy(conn_params.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
-            conn_params.min_int = 0x10;
-            conn_params.max_int = 0x20;
-            conn_params.latency = 0;
-            conn_params.timeout = 400;
-            esp_ble_gap_update_conn_params(&conn_params);
+            rc = ble_gap_conn_find(event->connect.conn_handle, &desc);
+            if (rc == 0) {
+                char addr_str[32];
+                snprintf(addr_str, sizeof(addr_str), 
+                         "%02x:%02x:%02x:%02x:%02x:%02x",
+                         desc.peer_ota_addr.val[5], desc.peer_ota_addr.val[4],
+                         desc.peer_ota_addr.val[3], desc.peer_ota_addr.val[2],
+                         desc.peer_ota_addr.val[1], desc.peer_ota_addr.val[0]);
+                storage_save_ble_addr(addr_str);
+                ESP_LOGI(TAG, "Peer address: %s", addr_str);
+            }
             
-            ESP_LOGI(BLE_TAG, "CTS time service ready, waiting for time synchronization");
-            
-            char addr_str[32];
-            snprintf(addr_str, sizeof(addr_str), "%02X:%02X:%02X:%02X:%02X:%02X",
-                     param->connect.remote_bda[0], param->connect.remote_bda[1], param->connect.remote_bda[2],
-                     param->connect.remote_bda[3], param->connect.remote_bda[4], param->connect.remote_bda[5]);
-            storage_save_ble_addr(addr_str);
-            break;
+            // 更新连接参数
+            struct ble_gap_upd_params params = {
+                .itvl_min = BLE_CONN_INT_MIN,
+                .itvl_max = BLE_CONN_INT_MAX,
+                .latency = BLE_CONN_LATENCY,
+                .supervision_timeout = BLE_CONN_TIMEOUT,
+                .min_ce_len = 0,
+                .max_ce_len = 0,
+            };
+            ble_gap_update_params(event->connect.conn_handle, &params);
+        } else {
+            // 连接失败，重新广播
+            ble_advertise();
+        }
+        break;
 
-        case ESP_GATTS_DISCONNECT_EVT:
-            s_ble_connected = false;
-            s_conn_id = 0xFFFF;
-            s_ble_state = BLE_STATE_ADVERTISING;
-            esp_ble_gap_start_advertising(NULL);
-            break;
+    case BLE_GAP_EVENT_DISCONNECT:
+        ESP_LOGI(TAG, "Disconnect; reason=%d", event->disconnect.reason);
+        s_ble_connected = false;
+        s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        s_ble_state = BLE_STATE_ADVERTISING;
+        
+        // 重新开始广播
+        ble_advertise();
+        break;
 
-        default:
-            // Delegate to service handlers
-            ble_bipupu_service_handle_event(event, gatts_if, param);
-            ble_battery_service_handle_event(event, gatts_if, param);
-            ble_cts_service_handle_event(event, gatts_if, param);
-            break;
+    case BLE_GAP_EVENT_CONN_UPDATE:
+        ESP_LOGI(TAG, "Connection updated; status=%d", event->conn_update.status);
+        break;
+
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        ESP_LOGI(TAG, "Advertise complete; reason=%d", event->adv_complete.reason);
+        if (event->adv_complete.reason == 0) {
+            // 广播超时，重新启动
+            ble_advertise();
+        }
+        break;
+
+    case BLE_GAP_EVENT_MTU:
+        ESP_LOGI(TAG, "MTU update event; conn_handle=%d mtu=%d",
+                 event->mtu.conn_handle, event->mtu.value);
+        break;
+
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        ESP_LOGI(TAG, "Subscribe event; conn_handle=%d attr_handle=%d reason=%d",
+                 event->subscribe.conn_handle,
+                 event->subscribe.attr_handle,
+                 event->subscribe.reason);
+        break;
+
+    default:
+        ESP_LOGD(TAG, "GAP event: %d", event->type);
+        break;
+    }
+
+    return 0;
+}
+
+/* ================== 广播配置 ================== */
+
+static void ble_advertise(void)
+{
+    struct ble_gap_adv_params adv_params;
+    struct ble_hs_adv_fields fields;
+    int rc;
+
+    memset(&fields, 0, sizeof(fields));
+
+    // 广播标志: 通用发现模式, 仅 BLE
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+
+    // 设备名称
+    fields.name = (uint8_t *)BLE_DEVICE_NAME;
+    fields.name_len = strlen(BLE_DEVICE_NAME);
+    fields.name_is_complete = 1;
+
+    // 设置广播数据
+    rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Error setting advertisement data; rc=%d", rc);
+        return;
+    }
+
+    // 扫描响应中添加 NUS 服务 UUID
+    struct ble_hs_adv_fields rsp_fields;
+    memset(&rsp_fields, 0, sizeof(rsp_fields));
+    
+    // NUS 服务 UUID (128-bit)
+    static ble_uuid128_t nus_uuid = BLE_UUID128_INIT(
+        0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
+        0x93, 0xF3, 0xA3, 0xB5, 0x01, 0x00, 0x40, 0x6E
+    );
+    rsp_fields.uuids128 = &nus_uuid;
+    rsp_fields.num_uuids128 = 1;
+    rsp_fields.uuids128_is_complete = 1;
+
+    rc = ble_gap_adv_rsp_set_fields(&rsp_fields);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Error setting scan response data; rc=%d", rc);
+        // 继续，不是致命错误
+    }
+
+    // 广播参数
+    memset(&adv_params, 0, sizeof(adv_params));
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;  // 可连接
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;  // 通用发现
+    adv_params.itvl_min = BLE_ADV_INTERVAL_MIN;
+    adv_params.itvl_max = BLE_ADV_INTERVAL_MAX;
+
+    rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER,
+                           &adv_params, ble_gap_event, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Error enabling advertisement; rc=%d", rc);
+        return;
+    }
+
+    s_ble_state = BLE_STATE_ADVERTISING;
+    ESP_LOGI(TAG, "Advertising started");
+}
+
+/* ================== NimBLE 主机回调 ================== */
+
+static void ble_on_reset(int reason)
+{
+    ESP_LOGE(TAG, "Resetting state; reason=%d", reason);
+    s_ble_state = BLE_STATE_ERROR;
+}
+
+static void ble_on_sync(void)
+{
+    int rc;
+
+    // 确定地址类型
+    rc = ble_hs_util_ensure_addr(0);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Error ensuring address; rc=%d", rc);
+        return;
+    }
+
+    rc = ble_hs_id_infer_auto(0, &s_own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Error determining address type; rc=%d", rc);
+        return;
+    }
+
+    // 打印设备地址
+    uint8_t addr_val[6] = {0};
+    ble_hs_id_copy_addr(s_own_addr_type, addr_val, NULL);
+    print_addr(addr_val);
+
+    s_ble_state = BLE_STATE_INITIALIZED;
+    ESP_LOGI(TAG, "BLE host synchronized");
+
+    // 开始广播
+    ble_advertise();
+}
+
+static void ble_host_task(void *param)
+{
+    ESP_LOGI(TAG, "BLE Host Task Started");
+    nimble_port_run();
+    nimble_port_freertos_deinit();
+}
+
+/* ================== GATT 服务注册 ================== */
+
+/**
+ * @brief 注册所有 GATT 服务
+ */
+static void gatt_svr_register_cb(struct ble_gatt_register_ctxt *ctxt, void *arg)
+{
+    char buf[BLE_UUID_STR_LEN];
+
+    switch (ctxt->op) {
+    case BLE_GATT_REGISTER_OP_SVC:
+        ESP_LOGD(TAG, "Registered service %s with handle=%d",
+                 ble_uuid_to_str(ctxt->svc.svc_def->uuid, buf),
+                 ctxt->svc.handle);
+        break;
+
+    case BLE_GATT_REGISTER_OP_CHR:
+        ESP_LOGD(TAG, "Registered characteristic %s with "
+                 "def_handle=%d val_handle=%d",
+                 ble_uuid_to_str(ctxt->chr.chr_def->uuid, buf),
+                 ctxt->chr.def_handle, ctxt->chr.val_handle);
+        break;
+
+    case BLE_GATT_REGISTER_OP_DSC:
+        ESP_LOGD(TAG, "Registered descriptor %s with handle=%d",
+                 ble_uuid_to_str(ctxt->dsc.dsc_def->uuid, buf),
+                 ctxt->dsc.handle);
+        break;
+
+    default:
+        break;
     }
 }
 
-/* ================== BLE管理接口实现 ================== */
+static int gatt_svr_init(void)
+{
+    int rc;
+
+    // 初始化标准 GAP 和 GATT 服务
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+
+    // 初始化自定义服务
+    rc = ble_nus_service_init();
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to init NUS service; rc=%d", rc);
+        return rc;
+    }
+    ble_nus_service_set_callback(nus_message_handler);
+
+    rc = ble_battery_service_init();
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to init Battery service; rc=%d", rc);
+        return rc;
+    }
+
+    rc = ble_cts_service_init();
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to init CTS service; rc=%d", rc);
+        return rc;
+    }
+
+    // 设置设备名称
+    rc = ble_svc_gap_device_name_set(BLE_DEVICE_NAME);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to set device name; rc=%d", rc);
+        return rc;
+    }
+
+    return 0;
+}
+
+/* ================== BLE 管理接口实现 ================== */
 
 esp_err_t ble_manager_init(void)
 {
+    int rc;
+
     if (s_ble_state == BLE_STATE_ERROR) {
-        ESP_LOGW(BLE_TAG, "BLE处于错误状态，尝试重新初始化...");
+        ESP_LOGW(TAG, "BLE in error state, attempting reinit...");
         ble_manager_deinit();
-        // 重置状态
         s_ble_state = BLE_STATE_UNINITIALIZED;
     }
-    if (s_ble_state != BLE_STATE_UNINITIALIZED) return ESP_OK;
     
-    s_ble_state = BLE_STATE_INITIALIZING;
-    esp_err_t ret;
-    
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    ret = esp_bt_controller_init(&bt_cfg);
-    if (ret) return ret;
-    
-    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
-    if (ret) return ret;
-    
-    ret = esp_bluedroid_init();
-    if (ret) return ret;
-    
-    ret = esp_bluedroid_enable();
-    if (ret) return ret;
-    
-    ret = esp_ble_gatts_register_callback(ble_gatts_event_handler);
-    if (ret) return ret;
-    
-    ret = esp_ble_gatts_app_register(0);
-    if (ret) return ret;
-    
-    ret = esp_ble_gap_set_device_name(BLE_DEVICE_NAME);
-    if (ret) return ret;
-    
-    // Config Advertising Data
-    esp_ble_adv_data_t adv_data = {
-        .set_scan_rsp = false,
-        .include_name = true,
-        .include_txpower = true,
-        .min_interval = BLE_ADV_INTERVAL_MIN,
-        .max_interval = BLE_ADV_INTERVAL_MAX,
-        .appearance = 0x00,
-        .manufacturer_len = 0,
-        .p_manufacturer_data = NULL,
-        .service_data_len = 0,
-        .p_service_data = NULL,
-        .service_uuid_len = ESP_UUID_LEN_128,
-        .p_service_uuid = (uint8_t*)s_bipupu_service_uuid,
-        .flag = (ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT),
-    };
-    ret = esp_ble_gap_config_adv_data(&adv_data);
-    if (ret != ESP_OK) {
-        ble_handle_error("Config Advertising Data", ret);
-        return ret;
+    if (s_ble_state != BLE_STATE_UNINITIALIZED) {
+        return ESP_OK;
     }
     
+    s_ble_state = BLE_STATE_INITIALIZING;
+
+    // 初始化 NimBLE 主机
+    rc = nimble_port_init();
+    if (rc != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to init nimble port; rc=%d", rc);
+        ble_handle_error("nimble_port_init", rc);
+        return ESP_FAIL;
+    }
+
+    // 配置主机回调
+    ble_hs_cfg.reset_cb = ble_on_reset;
+    ble_hs_cfg.sync_cb = ble_on_sync;
+    ble_hs_cfg.gatts_register_cb = gatt_svr_register_cb;
+    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+
+    // 初始化 GATT 服务
+    rc = gatt_svr_init();
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to init GATT server; rc=%d", rc);
+        ble_handle_error("gatt_svr_init", rc);
+        return ESP_FAIL;
+    }
+
+    // 启动 NimBLE 主机任务
+    nimble_port_freertos_init(ble_host_task);
+
+    ESP_LOGI(TAG, "BLE Manager initialized successfully (Native NimBLE)");
     return ESP_OK;
 }
 
 esp_err_t ble_manager_deinit(void)
 {
-    // Deinit services
-    ble_bipupu_service_deinit();
+    ESP_LOGI(TAG, "Deinitializing BLE Manager...");
+
+    // 停止广播
+    ble_gap_adv_stop();
+
+    // 断开连接
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    }
+
+    // 反初始化服务
+    ble_nus_service_deinit();
     ble_battery_service_deinit();
     ble_cts_service_deinit();
-    
-    // Simplified deinit
-    esp_bluedroid_disable();
-    esp_bluedroid_deinit();
-    esp_bt_controller_disable();
-    esp_bt_controller_deinit();
+
+    // 停止 NimBLE
+    int rc = nimble_port_stop();
+    if (rc == 0) {
+        nimble_port_deinit();
+    }
+
     s_ble_state = BLE_STATE_UNINITIALIZED;
+    s_ble_connected = false;
+    s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+
+    ESP_LOGI(TAG, "BLE Manager deinitialized");
     return ESP_OK;
 }
 
 esp_err_t ble_manager_start_advertising(void)
 {
-    esp_ble_adv_params_t adv_params = {
-        .adv_int_min = BLE_ADV_INTERVAL_MIN,
-        .adv_int_max = BLE_ADV_INTERVAL_MAX,
-        .adv_type = ADV_TYPE_IND,
-        .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
-        .channel_map = ADV_CHNL_ALL,
-        .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
-    };
-    return esp_ble_gap_start_advertising(&adv_params);
+    if (s_ble_state == BLE_STATE_UNINITIALIZED || 
+        s_ble_state == BLE_STATE_INITIALIZING) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    
+    if (s_ble_connected) {
+        ESP_LOGW(TAG, "Already connected, not advertising");
+        return ESP_OK;
+    }
+
+    ble_advertise();
+    return ESP_OK;
 }
 
 esp_err_t ble_manager_stop_advertising(void)
 {
-    return esp_ble_gap_stop_advertising();
+    int rc = ble_gap_adv_stop();
+    if (rc == 0) {
+        ESP_LOGI(TAG, "Advertising stopped");
+        if (s_ble_state == BLE_STATE_ADVERTISING) {
+            s_ble_state = BLE_STATE_INITIALIZED;
+        }
+        return ESP_OK;
+    }
+    
+    ESP_LOGE(TAG, "Failed to stop advertising; rc=%d", rc);
+    return ESP_FAIL;
 }
 
 void ble_manager_set_message_callback(ble_message_callback_t callback)
 {
     s_message_callback = callback;
-    ble_bipupu_service_set_message_callback(callback);
 }
 
 void ble_manager_set_cts_time_callback(ble_cts_time_callback_t callback)
@@ -253,13 +500,17 @@ uint32_t ble_manager_get_error_count(void)
     return s_error_count;
 }
 
-
 void ble_manager_poll(void)
 {
-    // 可以在这里添加周期性任务，如电量低警告等
+    // NimBLE 使用事件驱动，无需轮询
 }
 
 void ble_manager_update_battery_level(uint8_t level)
 {
     ble_battery_service_update_level(level);
+}
+
+uint16_t ble_manager_get_conn_id(void)
+{
+    return s_conn_handle;
 }

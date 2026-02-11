@@ -1,134 +1,246 @@
+/**
+ * @file ble_cts_service.c
+ * @brief Current Time Service (CTS) 实现 (原生 NimBLE 版本)
+ * 
+ * 实现蓝牙标准 CTS 服务，支持时间同步。
+ * 时间格式: Exact Time 256 (10 字节)
+ */
+
 #include "ble_cts_service.h"
-#include "esp_log.h"
-#include "esp_gatts_api.h"
-#include "esp_bt.h"
+#include "ble_config.h"
 #include "ble_protocol.h"
+
+#include "host/ble_hs.h"
+#include "host/ble_gatt.h"
+#include "services/gatt/ble_svc_gatt.h"
+
+#include "esp_log.h"
 #include <string.h>
 
-static const char* CTS_TAG = "ble_cts_service";
+static const char* TAG = "ble_cts";
 
-static ble_cts_service_handles_t s_handles = {0};
+/* ================== UUID 定义 ================== */
+
+// CTS Service UUID: 0x1805
+static const ble_uuid16_t cts_svc_uuid = BLE_UUID16_INIT(CTS_SERVICE_UUID);
+
+// Current Time Characteristic UUID: 0x2A2B
+static const ble_uuid16_t cts_time_chr_uuid = BLE_UUID16_INIT(CTS_CURRENT_TIME_UUID);
+
+// Local Time Info Characteristic UUID: 0x2A0F
+static const ble_uuid16_t cts_local_time_chr_uuid = BLE_UUID16_INIT(CTS_LOCAL_TIME_INFO_UUID);
+
+/* ================== 私有状态 ================== */
+static uint16_t s_time_chr_val_handle;       // Current Time 特征值句柄
+static uint16_t s_local_time_chr_val_handle; // Local Time Info 特征值句柄
 static ble_cts_time_callback_t s_time_callback = NULL;
+static bool s_notify_enabled = false;
+static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 
-/* UUIDs */
-static const uint16_t s_cts_service_uuid = CTS_SERVICE_UUID;
-static const uint16_t s_cts_time_uuid = CTS_CURRENT_TIME_UUID;
-static const uint16_t s_cts_local_time_uuid = CTS_LOCAL_TIME_INFO_UUID;
+// 当前时间数据缓存
+static uint8_t s_current_time_data[10] = {0};
 
-/* 处理 CTS 时间写入 */
-static void handle_cts_write(const uint8_t *data, uint16_t len) {
+// Local Time Info: UTC+8 (中国标准时间)
+static uint8_t s_local_time_info[2] = {32, 0};  // offset=32 (8*4), DST=0
+
+/* ================== 私有函数 ================== */
+
+/**
+ * @brief 处理 CTS 时间写入
+ */
+static void handle_time_write(const uint8_t* data, uint16_t len)
+{
     if (!data || len < 10) {
-        ESP_LOGE(CTS_TAG, "CTS data length insufficient: %d (need at least 10 bytes)", len);
+        ESP_LOGW(TAG, "CTS write data too short: %d bytes", len);
         return;
     }
 
-    ESP_LOGI(CTS_TAG, "Received CTS time write request, data length: %d", len);
-
     ble_cts_time_t cts_time;
     if (ble_protocol_parse_cts_time(data, len, &cts_time)) {
-        ESP_LOGI(CTS_TAG, "CTS time sync success - Date: %04d-%02d-%02d Time: %02d:%02d:%02d (Weekday %d, Adjust reason: 0x%02X)",
+        ESP_LOGI(TAG, "Time sync received: %04d-%02d-%02d %02d:%02d:%02d",
                  cts_time.year, cts_time.month, cts_time.day,
-                 cts_time.hour, cts_time.minute, cts_time.second,
-                 cts_time.weekday, cts_time.adjust_reason);
+                 cts_time.hour, cts_time.minute, cts_time.second);
+
+        // 缓存时间数据
+        memcpy(s_current_time_data, data, 10);
 
         if (s_time_callback) {
             s_time_callback(&cts_time);
         }
-
-        ESP_LOGI(CTS_TAG, "CTS time sync processing completed");
-    } else {
-        ESP_LOGE(CTS_TAG, "CTS time data parsing failed");
     }
 }
 
-esp_err_t ble_cts_service_init(esp_gatt_if_t gatts_if, ble_cts_service_handles_t* handles) {
-    if (!handles) return ESP_ERR_INVALID_ARG;
+/* ================== GATT 访问回调 ================== */
 
-    esp_gatt_srvc_id_t service_id;
-    service_id.is_primary = true;
-    service_id.id.inst_id = 2;
-    service_id.id.uuid.len = ESP_UUID_LEN_16;
-    service_id.id.uuid.uuid.uuid16 = s_cts_service_uuid;
+static int cts_time_chr_access(uint16_t conn_handle, uint16_t attr_handle,
+                                struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    int rc;
 
-    esp_err_t ret = esp_ble_gatts_create_service(gatts_if, &service_id, 5);
-    if (ret != ESP_OK) {
-        ESP_LOGE(CTS_TAG, "Failed to create CTS service: %s", esp_err_to_name(ret));
-        return ret;
+    switch (ctxt->op) {
+    case BLE_GATT_ACCESS_OP_READ_CHR:
+        // 返回缓存的时间数据
+        rc = os_mbuf_append(ctxt->om, s_current_time_data, sizeof(s_current_time_data));
+        if (rc != 0) {
+            return BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+        ESP_LOGD(TAG, "CTS time read request");
+        return 0;
+
+    case BLE_GATT_ACCESS_OP_WRITE_CHR:
+        // 手机写入时间数据
+        if (ctxt->om) {
+            uint16_t om_len = OS_MBUF_PKTLEN(ctxt->om);
+            uint8_t buf[16];
+            
+            if (om_len > sizeof(buf)) {
+                om_len = sizeof(buf);
+            }
+            
+            rc = ble_hs_mbuf_to_flat(ctxt->om, buf, om_len, NULL);
+            if (rc == 0) {
+                handle_time_write(buf, om_len);
+            }
+        }
+        return 0;
+
+    default:
+        return BLE_ATT_ERR_UNLIKELY;
     }
-
-    *handles = s_handles;
-    return ESP_OK;
 }
 
-void ble_cts_service_deinit(void) {
-    if (s_handles.service_handle != 0) {
-        esp_ble_gatts_delete_service(s_handles.service_handle);
-        s_handles.service_handle = 0;
-        s_handles.time_char_handle = 0;
-        s_handles.local_time_char_handle = 0;
+static int cts_local_time_chr_access(uint16_t conn_handle, uint16_t attr_handle,
+                                      struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    int rc;
+
+    switch (ctxt->op) {
+    case BLE_GATT_ACCESS_OP_READ_CHR:
+        // 返回时区信息
+        rc = os_mbuf_append(ctxt->om, s_local_time_info, sizeof(s_local_time_info));
+        if (rc != 0) {
+            return BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+        ESP_LOGD(TAG, "Local time info read request");
+        return 0;
+
+    default:
+        return BLE_ATT_ERR_UNLIKELY;
     }
+}
+
+/* ================== GATT 服务定义 ================== */
+
+static const struct ble_gatt_svc_def cts_svc_def[] = {
+    {
+        // CTS Service
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &cts_svc_uuid.u,
+        .characteristics = (struct ble_gatt_chr_def[]) {
+            {
+                // Current Time Characteristic
+                .uuid = &cts_time_chr_uuid.u,
+                .access_cb = cts_time_chr_access,
+                .val_handle = &s_time_chr_val_handle,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY,
+            },
+            {
+                // Local Time Info Characteristic (只读)
+                .uuid = &cts_local_time_chr_uuid.u,
+                .access_cb = cts_local_time_chr_access,
+                .val_handle = &s_local_time_chr_val_handle,
+                .flags = BLE_GATT_CHR_F_READ,
+            },
+            {
+                0, // 终止符
+            },
+        },
+    },
+    {
+        0, // 终止符
+    },
+};
+
+/* ================== 公开接口实现 ================== */
+
+int ble_cts_service_init(void)
+{
+    int rc;
+
+    s_notify_enabled = false;
+    s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    memset(s_current_time_data, 0, sizeof(s_current_time_data));
+
+    // 注册 GATT 服务
+    rc = ble_gatts_count_cfg(cts_svc_def);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to count CTS service config; rc=%d", rc);
+        return rc;
+    }
+
+    rc = ble_gatts_add_svcs(cts_svc_def);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to add CTS service; rc=%d", rc);
+        return rc;
+    }
+
+    ESP_LOGI(TAG, "CTS service initialized (Native NimBLE)");
+    return 0;
+}
+
+void ble_cts_service_deinit(void)
+{
     s_time_callback = NULL;
+    s_notify_enabled = false;
+    s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    ESP_LOGI(TAG, "CTS service deinitialized");
 }
 
-void ble_cts_service_set_time_callback(ble_cts_time_callback_t callback) {
+void ble_cts_service_set_time_callback(ble_cts_time_callback_t callback)
+{
     s_time_callback = callback;
 }
 
-void ble_cts_service_handle_event(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param) {
-    switch (event) {
-        case ESP_GATTS_CREATE_EVT:
-            if (param->create.service_id.id.inst_id == 2) {
-                s_handles.service_handle = param->create.service_handle;
-                esp_ble_gatts_start_service(s_handles.service_handle);
-
-                // Add Current Time characteristic
-                esp_bt_uuid_t cts_time_uuid;
-                cts_time_uuid.len = ESP_UUID_LEN_16;
-                cts_time_uuid.uuid.uuid16 = s_cts_time_uuid;
-
-                esp_attr_value_t cts_time_val = { .attr_max_len = 10, .attr_len = 0, .attr_value = NULL };
-                esp_ble_gatts_add_char(s_handles.service_handle, &cts_time_uuid,
-                                     ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-                                     ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_NOTIFY,
-                                     &cts_time_val, NULL);
-
-                // Add Local Time Info characteristic
-                esp_bt_uuid_t cts_local_time_uuid;
-                cts_local_time_uuid.len = ESP_UUID_LEN_16;
-                cts_local_time_uuid.uuid.uuid16 = s_cts_local_time_uuid;
-
-                esp_attr_value_t cts_local_time_val = { .attr_max_len = 2, .attr_len = 0, .attr_value = NULL };
-                esp_ble_gatts_add_char(s_handles.service_handle, &cts_local_time_uuid,
-                                     ESP_GATT_PERM_READ,
-                                     ESP_GATT_CHAR_PROP_BIT_READ,
-                                     &cts_local_time_val, NULL);
-            }
-            break;
-
-        case ESP_GATTS_ADD_CHAR_EVT:
-            if (param->add_char.char_uuid.len == ESP_UUID_LEN_16) {
-                if (param->add_char.char_uuid.uuid.uuid16 == s_cts_time_uuid) {
-                    s_handles.time_char_handle = param->add_char.attr_handle;
-                    // Add CCCD for Notify
-                    esp_bt_uuid_t cccd_uuid = { .len = ESP_UUID_LEN_16, .uuid = { .uuid16 = ESP_GATT_UUID_CHAR_CLIENT_CONFIG } };
-                    esp_attr_value_t cccd_val = { .attr_max_len = 2, .attr_len = 2, .attr_value = (uint8_t[]){0x00, 0x00} };
-                    esp_ble_gatts_add_char_descr(s_handles.service_handle, &cccd_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE, &cccd_val, NULL);
-                } else if (param->add_char.char_uuid.uuid.uuid16 == s_cts_local_time_uuid) {
-                    s_handles.local_time_char_handle = param->add_char.attr_handle;
-                }
-            }
-            break;
-
-        case ESP_GATTS_WRITE_EVT:
-            if (param->write.handle == s_handles.time_char_handle) {
-                handle_cts_write(param->write.value, param->write.len);
-                if (param->write.need_rsp) {
-                    esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
-                }
-            }
-            break;
-
-        default:
-            break;
+esp_err_t ble_cts_service_notify_time(uint16_t conn_handle, const ble_cts_time_t* time_info)
+{
+    if (s_time_chr_val_handle == 0) {
+        return ESP_ERR_INVALID_STATE;
     }
+
+    if (conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t data[10];
+    uint16_t len = sizeof(data);
+
+    if (!ble_protocol_create_cts_response(time_info, data, &len)) {
+        return ESP_FAIL;
+    }
+
+    // 构建 mbuf
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
+    if (om == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate mbuf");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // 发送通知
+    int rc = ble_gatts_notify_custom(conn_handle, s_time_chr_val_handle, om);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to send time notification; rc=%d", rc);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+void ble_cts_service_set_conn_handle(uint16_t conn_handle)
+{
+    s_conn_handle = conn_handle;
+}
+
+uint16_t ble_cts_service_get_time_handle(void)
+{
+    return s_time_chr_val_handle;
 }

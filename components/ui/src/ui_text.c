@@ -14,7 +14,7 @@ static int prev_utf8_start(const char* s, int idx) {
 
 void ui_draw_text_clipped(int x, int y, int max_width, const char* text) {
     if (!text) return;
-    board_display_set_font(u8g2_font_wqy12_t_gb2312a);
+    // 使用调用者已设置的字体
     int text_w = board_display_text_width(text);
     if (text_w <= max_width) {
         board_display_text(x, y, text);
@@ -47,7 +47,7 @@ void ui_draw_text_clipped(int x, int y, int max_width, const char* text) {
 
 void ui_draw_text_centered(int area_x, int area_y, int area_width, const char* text) {
     if (!text) return;
-    board_display_set_font(u8g2_font_wqy12_t_gb2312a);
+    // 使用调用者已设置的字体，不强制覆盖
     int w = board_display_text_width(text);
     int tx = area_x + (area_width - w) / 2;
     if (tx < area_x) tx = area_x;

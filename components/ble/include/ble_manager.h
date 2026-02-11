@@ -1,10 +1,19 @@
+/**
+ * @file ble_manager.h
+ * @brief BLE 管理器接口定义 (原生 NimBLE 版本)
+ * 
+ * BLE 管理器负责：
+ * - 初始化和管理 BLE 栈 (原生 NimBLE)
+ * - 管理 NUS、电池、CTS 服务
+ * - 处理连接状态
+ * - 提供消息收发接口
+ */
+
 #pragma once
 
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
-#include "esp_gap_ble_api.h"
-#include "esp_gatts_api.h"
 #include "ble_config.h"
 #include "ble_protocol.h"
 
@@ -12,7 +21,7 @@
 extern "C" {
 #endif
 
-/* ================== BLE状态枚举 ================== */
+/* ================== BLE 状态枚举 ================== */
 typedef enum {
     BLE_STATE_UNINITIALIZED,    // 未初始化
     BLE_STATE_INITIALIZING,     // 初始化中
@@ -22,31 +31,99 @@ typedef enum {
     BLE_STATE_ERROR             // 错误状态
 } ble_state_t;
 
-/* BLE消息接收回调函数类型 */
-typedef void (*ble_message_callback_t)(const char* sender, const char* message, const ble_effect_t* effect);
-
-/* CTS 时间同步回调函数类型 (蓝牙标准 Current Time Service) */
-typedef void (*ble_cts_time_callback_t)(const ble_cts_time_t* cts_time);
-
-/* ================== BLE管理接口 ================== */
+/* ================== 回调函数类型 ================== */
 
 /**
- * @brief 初始化BLE管理器
- * @return ESP_OK 成功，其他值表示错误
+ * @brief 消息接收回调 (从 NUS TX 特征接收)
+ * @param sender 发送者名称
+ * @param message 消息内容
+ * @param effect 附带效果 (可选)
+ */
+typedef void (*ble_message_callback_t)(const char* sender, const char* message, 
+                                        const ble_effect_t* effect);
+
+/**
+ * @brief CTS 时间同步回调
+ * @param cts_time CTS 时间数据
+ */
+typedef void (*ble_cts_time_callback_t)(const ble_cts_time_t* cts_time);
+
+/* ================== 生命周期接口 ================== */
+
+/**
+ * @brief 初始化 BLE 管理器
+ * @return ESP_OK 成功
  */
 esp_err_t ble_manager_init(void);
 
 /**
- * @brief 反初始化BLE管理器
- * @return ESP_OK 成功，其他值表示错误
+ * @brief 反初始化 BLE 管理器
+ * @return ESP_OK 成功
  */
 esp_err_t ble_manager_deinit(void);
 
+/* ================== 广播接口 ================== */
+
 /**
- * @brief 启动BLE广告
- * @return ESP_OK 成功，其他值表示错误
+ * @brief 启动 BLE 广播
+ * @return ESP_OK 成功
  */
 esp_err_t ble_manager_start_advertising(void);
+
+/**
+ * @brief 停止 BLE 广播
+ * @return ESP_OK 成功
+ */
+esp_err_t ble_manager_stop_advertising(void);
+
+/* ================== 回调设置 ================== */
+
+/**
+ * @brief 设置消息接收回调
+ * @param callback 回调函数
+ */
+void ble_manager_set_message_callback(ble_message_callback_t callback);
+
+/**
+ * @brief 设置 CTS 时间同步回调
+ * @param callback 回调函数
+ */
+void ble_manager_set_cts_time_callback(ble_cts_time_callback_t callback);
+
+/* ================== 状态查询 ================== */
+
+/**
+ * @brief 检查是否已连接
+ * @return true 已连接
+ */
+bool ble_manager_is_connected(void);
+
+/**
+ * @brief 获取当前状态
+ * @return 当前 BLE 状态
+ */
+ble_state_t ble_manager_get_state(void);
+
+/**
+ * @brief 获取状态字符串
+ * @param state BLE 状态
+ * @return 状态描述字符串
+ */
+const char* ble_manager_state_to_string(ble_state_t state);
+
+/**
+ * @brief 获取设备名称
+ * @return 设备名称
+ */
+const char* ble_manager_get_device_name(void);
+
+/**
+ * @brief 获取错误计数
+ * @return 错误次数
+ */
+uint32_t ble_manager_get_error_count(void);
+
+/* ================== 数据更新 ================== */
 
 /**
  * @brief 更新电池电量
@@ -55,58 +132,15 @@ esp_err_t ble_manager_start_advertising(void);
 void ble_manager_update_battery_level(uint8_t level);
 
 /**
- * @brief 停止BLE广告
- * @return ESP_OK 成功，其他值表示错误
- */
-esp_err_t ble_manager_stop_advertising(void);
-
-/**
- * @brief 设置消息接收回调
- * @param callback 回调函数指针，为NULL时取消回调
- */
-void ble_manager_set_message_callback(ble_message_callback_t callback);
-
-/**
- * @brief 设置 CTS 时间同步回调 (蓝牙标准 Current Time Service)
- * @param callback 回调函数指针，为NULL时取消回调
- */
-void ble_manager_set_cts_time_callback(ble_cts_time_callback_t callback);
-
-/**
- * @brief 检查BLE是否已连接
- * @return true 已连接，false 未连接
- */
-bool ble_manager_is_connected(void);
-
-/**
- * @brief 获取BLE当前状态
- * @return 当前BLE状态
- */
-ble_state_t ble_manager_get_state(void);
-
-/**
- * @brief 获取BLE状态字符串
- * @param state BLE状态
- * @return 状态字符串
- */
-const char* ble_manager_state_to_string(ble_state_t state);
-
-/**
- * @brief 获取BLE设备名称
- * @return 设备名称
- */
-const char* ble_manager_get_device_name(void);
-
-/**
- * @brief 获取BLE错误计数
- * @return 错误总次数
- */
-uint32_t ble_manager_get_error_count(void);
-
-/**
- * @brief BLE轮询处理（用于主循环中）
+ * @brief BLE 轮询处理
  */
 void ble_manager_poll(void);
+
+/**
+ * @brief 获取当前连接句柄
+ * @return 连接句柄 (BLE_HS_CONN_HANDLE_NONE 表示未连接)
+ */
+uint16_t ble_manager_get_conn_id(void);
 
 #ifdef __cplusplus
 }

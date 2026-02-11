@@ -4,6 +4,8 @@
 #include "u8g2.h"
 #include "ui_icons.h"
 #include "ui_status.h"
+#include "ui.h"
+#include "ui_text.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -26,25 +28,62 @@ void ui_render_main(int message_count, int unread_count) {
 
   ui_render_status_bar(NULL);
 
-  // 显示欢迎语或大时钟
-  board_display_text(30, 35, "BIPI PAGER");
+  // 获取当前时间
+  time_t now;
+  time(&now);
+  struct tm *t = localtime(&now);
+  
+  // 使用大字体显示时钟
+  if (t) {
+    char time_str[16];
+    snprintf(time_str, sizeof(time_str), "%02d:%02d", t->tm_hour, t->tm_min);
+    
+    // 使用更大的字体绘制时间
+    board_display_set_font(u8g2_font_logisoso24_tn);
+    int time_width = board_display_text_width(time_str);
+    int time_x = (128 - time_width) / 2;
+    board_display_text(time_x, 40, time_str);
+    
+    // 显示日期 (在时间下方)
+    board_display_set_font(u8g2_font_wqy12_t_gb2312a);
+    char date_str[32];
+    snprintf(date_str, sizeof(date_str), "%d月%d日 周%s", 
+             t->tm_mon + 1, t->tm_mday,
+             (const char*[]){"日","一","二","三","四","五","六"}[t->tm_wday]);
+    int date_width = board_display_text_width(date_str);
+    board_display_text((128 - date_width) / 2, 52, date_str);
+  } else {
+    // 无法获取时间时显示欢迎语
+    board_display_set_font(u8g2_font_wqy12_t_gb2312a);
+    ui_draw_text_centered(0, 35, 128, "BIPI PAGER");
+  }
 
-  // 显示消息计数，使用图标
-  char msg_info[64];
+  // 底部状态区域
+  int y_bottom = 63;
+  board_display_set_font(u8g2_font_wqy12_t_gb2312a);
+  
+  // 左侧：消息计数
   if (message_count > 0) {
-    // 使用邮件图标
     board_display_set_font(u8g2_font_open_iconic_email_1x_t);
-    board_display_glyph(10, 45, ICON_EMAIL_1X); // 邮件图标
+    board_display_glyph(2, y_bottom - 3, ICON_EMAIL_1X);
     board_display_set_font(u8g2_font_wqy12_t_gb2312a);
     
-    snprintf(msg_info, sizeof(msg_info), " %d (未读: %d)", message_count, unread_count);
-    board_display_text(22, 55, msg_info);
+    char msg_info[32];
+    if (unread_count > 0) {
+      snprintf(msg_info, sizeof(msg_info), "%d新", unread_count);
+    } else {
+      snprintf(msg_info, sizeof(msg_info), "%d条", message_count);
+    }
+    board_display_text(14, y_bottom, msg_info);
   } else {
-    // 使用信息图标表示无消息
-    board_display_set_font(u8g2_font_open_iconic_other_1x_t);
-    board_display_glyph(10, 45, ICON_INFO_1X); // 信息图标
+    board_display_text(2, y_bottom, "无消息");
+  }
+  
+  // 右侧：手电筒状态
+  if (ui_is_flashlight_on()) {
+    board_display_set_font(u8g2_font_open_iconic_thing_1x_t);
+    board_display_glyph(112, y_bottom - 3, 0x4E); // 灯泡图标
     board_display_set_font(u8g2_font_wqy12_t_gb2312a);
-    board_display_text(22, 55, "暂无消息");
   }
 
   board_display_end();
@@ -141,5 +180,45 @@ void ui_render_message_read(const ui_message_t *msg, int current_idx,
 
 void ui_render_standby(void) {
   board_display_begin();
-  board_display_end(); // 清屏
+  
+  // 屏保模式：显示移动的小点防止烧屏，同时显示时间
+  static uint32_t last_update = 0;
+  static int dot_x = 64;
+  static int dot_y = 32;
+  static int dx = 1;
+  static int dy = 1;
+  
+  uint32_t now = board_time_ms();
+  
+  // 每100ms更新一次位置
+  if (now - last_update > 100) {
+    dot_x += dx;
+    dot_y += dy;
+    
+    // 边界反弹
+    if (dot_x <= 2 || dot_x >= 124) dx = -dx;
+    if (dot_y <= 2 || dot_y >= 60) dy = -dy;
+    
+    last_update = now;
+  }
+  
+  // 绘制移动的小点
+  board_display_rect(dot_x - 1, dot_y - 1, 3, 3, true);
+  
+  // 在屏幕中央偏下显示时间（较小字体）
+  time_t time_now;
+  time(&time_now);
+  struct tm *t = localtime(&time_now);
+  if (t) {
+    char time_str[8];
+    snprintf(time_str, sizeof(time_str), "%02d:%02d", t->tm_hour, t->tm_min);
+    board_display_set_font(u8g2_font_wqy12_t_gb2312a);
+    int tw = board_display_text_width(time_str);
+    // 时间位置也随小点移动，但范围较小
+    int time_x = 64 - tw/2 + (dot_x - 64) / 8;
+    int time_y = 40 + (dot_y - 32) / 8;
+    board_display_text(time_x, time_y, time_str);
+  }
+  
+  board_display_end();
 }

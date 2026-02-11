@@ -17,33 +17,6 @@ esp_err_t board_init(void) {
   // 各模块初始化
   // 注意：部分模块可能依赖I2C或其他基础配置，需注意初始化顺序
 
-  // 0. I2C 充能/恢复阶段（在创建 I2C 总线之前手动翻转 SCL，以防止挂起的从设备）
-  {
-    ESP_LOGI(BOARD_TAG, "Cleaning I2C bus before display init...");
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << (int)BOARD_I2C_SCL_IO),
-        .mode = GPIO_MODE_OUTPUT_OD,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    // 配置 SCL 为开漏输出以安全驱动总线
-    gpio_config(&io_conf);
-
-    for (int i = 0; i < 9; i++) {
-      gpio_set_level(BOARD_I2C_SCL_IO, 1);
-      vTaskDelay(pdMS_TO_TICKS(2));
-      gpio_set_level(BOARD_I2C_SCL_IO, 0);
-      vTaskDelay(pdMS_TO_TICKS(2));
-    }
-
-    // 给总线 100ms 的纯净充电时间
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    // 将 SCL 引脚恢复为未配置状态（由后续的 i2c_new_master_bus 接管）
-    gpio_reset_pin(BOARD_I2C_SCL_IO);
-  }
-
   // 1. 基础总线初始化
   board_i2c_init();
 

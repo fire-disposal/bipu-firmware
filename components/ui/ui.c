@@ -4,22 +4,44 @@
 #include "ui_render.h"
 #include "board.h"
 #include "storage.h"
+#include "app_effects.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <string.h>
 
 static const char* UI_TAG = "ui_manager";
 
+/* ================== UI 互斥锁 ================== */
+// 保护所有 UI 状态（state, messages, indices, page vars）
+// 避免 app_task(ui_on_key) 与 gui_task(ui_tick) 之间的竞态
+static SemaphoreHandle_t s_ui_mutex = NULL;
+
+static inline bool ui_lock(void) {
+    if (s_ui_mutex == NULL) return true;
+    return xSemaphoreTake(s_ui_mutex, pdMS_TO_TICKS(200)) == pdTRUE;
+}
+
+static inline void ui_unlock(void) {
+    if (s_ui_mutex != NULL) {
+        xSemaphoreGive(s_ui_mutex);
+    }
+}
+
 #define STANDBY_TIMEOUT_MS 30000
+#define DEFAULT_BRIGHTNESS 100
 
 /* ================== 外部页面引用 ================== */
 extern const ui_page_t page_main;
 extern const ui_page_t page_list;
 extern const ui_page_t page_message;
+extern const ui_page_t page_settings;
 
 static const ui_page_t* s_pages[] = {
     [UI_STATE_MAIN] = &page_main,
     [UI_STATE_MESSAGE_LIST] = &page_list,
     [UI_STATE_MESSAGE_READ] = &page_message,
+    [UI_STATE_SETTINGS] = &page_settings,
 };
 
 /* ================== 内部状态定义 ================== */
@@ -29,6 +51,8 @@ typedef struct {
     int message_count;
     int current_msg_idx;
     uint32_t last_activity_time;
+    bool flashlight_on;      // 手电筒状态
+    uint8_t brightness;      // OLED亮度 (10-100%)
 } ui_context_t;
 
 static ui_context_t s_ui;
@@ -89,6 +113,15 @@ void ui_change_page(ui_state_enum_t new_state) {
 /* ================== 核心接口实现 ================== */
 void ui_init(void) {
     memset(&s_ui, 0, sizeof(s_ui));
+    s_ui.brightness = DEFAULT_BRIGHTNESS;
+    s_ui.flashlight_on = false;
+    
+    // 创建 UI 互斥锁（保护 UI 状态免受多任务竞态）
+    s_ui_mutex = xSemaphoreCreateMutex();
+    if (s_ui_mutex == NULL) {
+        ESP_LOGE(UI_TAG, "Failed to create UI mutex!");
+    }
+    
     // initialize NVS storage and load persisted messages
     if (storage_init() == ESP_OK) {
         int loaded_count = 0;
@@ -97,6 +130,13 @@ void ui_init(void) {
             s_ui.message_count = loaded_count;
             s_ui.current_msg_idx = loaded_idx;
             ESP_LOGI(UI_TAG, "Loaded %d messages from storage, current idx=%d", loaded_count, loaded_idx);
+        }
+        // 加载保存的亮度设置
+        uint8_t saved_brightness = 0;
+        if (storage_load_brightness(&saved_brightness) == ESP_OK) {
+            s_ui.brightness = saved_brightness;
+            board_display_set_contrast((uint8_t)((saved_brightness * 255) / 100));
+            ESP_LOGI(UI_TAG, "Loaded brightness: %d%%", saved_brightness);
         }
     } else {
         ESP_LOGW(UI_TAG, "storage_init failed");
@@ -110,10 +150,16 @@ void ui_init(void) {
 }
 
 void ui_tick(void) {
+    if (!ui_lock()) {
+        ESP_LOGW(UI_TAG, "ui_tick: failed to acquire lock, skip frame");
+        return;
+    }
+
     if (s_ui.state != UI_STATE_STANDBY) {
         if (board_time_ms() - s_ui.last_activity_time > STANDBY_TIMEOUT_MS) {
             ESP_LOGD(UI_TAG, "Activity timeout, entering standby");
             ui_enter_standby();
+            ui_unlock();
             return;
         }
         
@@ -124,10 +170,18 @@ void ui_tick(void) {
         // 在待机状态下，我们仍然需要检查按键来唤醒
         ESP_LOGD(UI_TAG, "In standby state, waiting for key press");
     }
+
+    ui_unlock();
 }
 
 void ui_on_key(board_key_t key) {
     ESP_LOGI(UI_TAG, "UI received key: %d, current state: %d", key, s_ui.state);
+
+    if (!ui_lock()) {
+        ESP_LOGW(UI_TAG, "ui_on_key: failed to acquire lock, drop key %d", key);
+        return;
+    }
+
     ui_update_activity();
 
     if (s_ui.state == UI_STATE_STANDBY) {
@@ -142,6 +196,7 @@ void ui_on_key(board_key_t key) {
                 ESP_LOGI(UI_TAG, "Delegated key %d to page handler for state %d", key, s_ui.state);
             }
         }
+        ui_unlock();
         return;
     }
 
@@ -151,9 +206,16 @@ void ui_on_key(board_key_t key) {
     } else {
         ESP_LOGW(UI_TAG, "No key handler for state %d", s_ui.state);
     }
+
+    ui_unlock();
 }
 
 void ui_show_message(const char* sender, const char* text) {
+    if (!ui_lock()) {
+        ESP_LOGW(UI_TAG, "ui_show_message: failed to acquire lock, message dropped");
+        return;
+    }
+
     if (s_ui.message_count >= MAX_MESSAGES) {
         for (int i = 0; i < MAX_MESSAGES - 1; i++) {
             s_ui.messages[i] = s_ui.messages[i + 1];
@@ -174,15 +236,22 @@ void ui_show_message(const char* sender, const char* text) {
     s_ui.current_msg_idx = s_ui.message_count - 1;
     ui_change_page(UI_STATE_MESSAGE_READ);
     board_notify();
+    // 来信提醒LED闪烁
+    app_effects_notify_blink(3000);
     // persist after adding
     storage_save_messages(s_ui.messages, s_ui.message_count, s_ui.current_msg_idx);
+
+    ui_unlock();
 }
 
 void ui_enter_standby(void) {
     if (s_ui.state != UI_STATE_STANDBY) {
         s_ui.state = UI_STATE_STANDBY;
         ui_render_standby();
-        board_leds_off();
+        // 进入待机时，只有手电筒未开启才关闭LED
+        if (!s_ui.flashlight_on) {
+            board_leds_off();
+        }
         ESP_LOGI(UI_TAG, "Entered standby");
     }
 }
@@ -195,3 +264,64 @@ void ui_wake_up(void) {
     }
 }
 
+/* ================== 消息删除功能 ================== */
+void ui_delete_current_message(void) {
+    if (s_ui.message_count <= 0) return;
+    
+    int idx = s_ui.current_msg_idx;
+    if (idx < 0 || idx >= s_ui.message_count) return;
+    
+    // 移动后面的消息
+    for (int i = idx; i < s_ui.message_count - 1; i++) {
+        s_ui.messages[i] = s_ui.messages[i + 1];
+    }
+    s_ui.message_count--;
+    
+    // 调整当前索引
+    if (s_ui.current_msg_idx >= s_ui.message_count && s_ui.message_count > 0) {
+        s_ui.current_msg_idx = s_ui.message_count - 1;
+    }
+    
+    // 持久化
+    storage_save_messages(s_ui.messages, s_ui.message_count, s_ui.current_msg_idx);
+    
+    ESP_LOGI(UI_TAG, "Deleted message at idx %d, remaining: %d", idx, s_ui.message_count);
+}
+
+/* ================== 手电筒功能 ================== */
+bool ui_is_flashlight_on(void) {
+    return s_ui.flashlight_on;
+}
+
+void ui_toggle_flashlight(void) {
+    s_ui.flashlight_on = !s_ui.flashlight_on;
+    
+    if (s_ui.flashlight_on) {
+        // 点亮所有LED作为手电筒
+        board_leds_t leds = { .led1 = 255, .led2 = 255, .led3 = 255 };
+        board_leds_set(leds);
+        ESP_LOGI(UI_TAG, "Flashlight ON");
+    } else {
+        board_leds_off();
+        ESP_LOGI(UI_TAG, "Flashlight OFF");
+    }
+}
+
+/* ================== 亮度控制 ================== */
+uint8_t ui_get_brightness(void) {
+    return s_ui.brightness;
+}
+
+void ui_set_brightness(uint8_t level) {
+    if (level < 10) level = 10;
+    if (level > 100) level = 100;
+    s_ui.brightness = level;
+    
+    // 应用亮度到显示器
+    board_display_set_contrast((uint8_t)((level * 255) / 100));
+    
+    // 保存到存储
+    storage_save_brightness(level);
+    
+    ESP_LOGI(UI_TAG, "Brightness set to %d%%", level);
+}

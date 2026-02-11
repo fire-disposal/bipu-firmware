@@ -42,7 +42,6 @@
 
 # ESP-IDF specific files
 build/
-sdkconfig
 sdkconfig.old
 
 # ESP-IDF build artifacts

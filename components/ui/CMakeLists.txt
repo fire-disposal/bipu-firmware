@@ -7,6 +7,7 @@ idf_component_register(
         "src/ui_page_main.c"
         "src/ui_page_list.c"
         "src/ui_page_message.c"
+        "src/ui_page_settings.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -14,4 +15,5 @@ idf_component_register(
     PRIV_REQUIRES
         ble
         u8g2
+        app
 )

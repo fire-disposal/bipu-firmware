@@ -17,6 +17,7 @@ typedef enum {
     UI_STATE_MAIN,         // 主界面（时钟/状态）
     UI_STATE_MESSAGE_LIST, // 消息列表
     UI_STATE_MESSAGE_READ, // 消息阅读
+    UI_STATE_SETTINGS,     // 设置页面
 } ui_state_enum_t;
 
 /* ================== UI 核心接口 ================== */
@@ -35,9 +36,17 @@ ui_message_t* ui_get_message_at(int idx);
 
 /* ================== 业务接口 ================== */
 void ui_show_message(const char* sender, const char* text);
+void ui_delete_current_message(void);
 void ui_enter_standby(void);
 void ui_wake_up(void);
 
+/* ================== 手电筒接口 ================== */
+bool ui_is_flashlight_on(void);
+void ui_toggle_flashlight(void);
+
+/* ================== 设置接口 ================== */
+uint8_t ui_get_brightness(void);
+void ui_set_brightness(uint8_t level);
 
 #ifdef __cplusplus
 }

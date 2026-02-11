@@ -1,10 +1,17 @@
+/**
+ * @file ble_cts_service.h
+ * @brief Current Time Service (CTS) 接口定义 (原生 NimBLE 版本)
+ * 
+ * CTS 是蓝牙标准服务 (UUID: 0x1805)，用于时间同步。
+ * - Current Time 特征 (0x2A2B): 读写，用于接收/发送时间
+ * - Local Time Info 特征 (0x2A0F): 只读，提供时区信息
+ */
+
 #pragma once
 
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
-#include "esp_gatts_api.h"
-#include "esp_bt_defs.h"
 #include "ble_config.h"
 #include "ble_protocol.h"
 
@@ -12,23 +19,16 @@
 extern "C" {
 #endif
 
-/* CTS 服务句柄 */
-typedef struct {
-    uint16_t service_handle;
-    uint16_t time_char_handle;
-    uint16_t local_time_char_handle;
-} ble_cts_service_handles_t;
-
-/* CTS 时间回调类型 */
+/* ================== 回调函数类型 ================== */
 typedef void (*ble_cts_time_callback_t)(const ble_cts_time_t* cts_time);
 
+/* ================== 服务接口 ================== */
+
 /**
- * @brief 初始化 CTS 服务
- * @param gatts_if GATT 接口
- * @param handles 输出服务句柄
- * @return ESP_OK 成功，其他值表示错误
+ * @brief 初始化 CTS 服务 (原生 NimBLE 版本)
+ * @return 0 成功
  */
-esp_err_t ble_cts_service_init(esp_gatt_if_t gatts_if, ble_cts_service_handles_t* handles);
+int ble_cts_service_init(void);
 
 /**
  * @brief 反初始化 CTS 服务
@@ -37,17 +37,23 @@ void ble_cts_service_deinit(void);
 
 /**
  * @brief 设置 CTS 时间回调
- * @param callback 回调函数
  */
 void ble_cts_service_set_time_callback(ble_cts_time_callback_t callback);
 
 /**
- * @brief 处理 CTS 服务的事件
- * @param event 事件类型
- * @param gatts_if GATT 接口
- * @param param 事件参数
+ * @brief 通知客户端当前时间
  */
-void ble_cts_service_handle_event(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t* param);
+esp_err_t ble_cts_service_notify_time(uint16_t conn_handle, const ble_cts_time_t* time_info);
+
+/**
+ * @brief 设置连接句柄
+ */
+void ble_cts_service_set_conn_handle(uint16_t conn_handle);
+
+/**
+ * @brief 获取 Current Time 特征值句柄
+ */
+uint16_t ble_cts_service_get_time_handle(void);
 
 #ifdef __cplusplus
 }
