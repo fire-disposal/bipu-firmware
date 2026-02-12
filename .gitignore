@@ -42,6 +42,7 @@
 
 # ESP-IDF specific files
 build/
+sdkconfig
 sdkconfig.old
 
 # ESP-IDF build artifacts
@@ -59,7 +60,7 @@ flash_app_args
 flash_bootloader_args
 
 # ESP-IDF component manager
-# dependencies.lock
+dependencies.lock
 managed_components/
 
 # IDE specific files

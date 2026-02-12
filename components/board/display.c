@@ -27,8 +27,11 @@ static inline void display_unlock(void) {
 /* ================== u8g2 回调函数 ================== */
 static uint8_t u8g2_esp32_i2c_byte_cb(u8x8_t *u8x8, uint8_t msg,
                                       uint8_t arg_int, void *arg_ptr) {
-  static uint8_t buffer[128];
-  static uint8_t buf_idx = 0;
+  // 增大缓冲以减少分段频率，同时实现分段发送以避免丢字节
+  #define I2C_TX_BUFFER_SIZE 256
+  #define I2C_TX_CHUNK_SIZE 64
+  static uint8_t buffer[I2C_TX_BUFFER_SIZE];
+  static size_t buf_idx = 0;
 
   switch (msg) {
   case U8X8_MSG_BYTE_START_TRANSFER:
@@ -37,7 +40,30 @@ static uint8_t u8g2_esp32_i2c_byte_cb(u8x8_t *u8x8, uint8_t msg,
 
   case U8X8_MSG_BYTE_SEND: {
     uint8_t *data = (uint8_t *)arg_ptr;
-    for (int i = 0; i < arg_int && buf_idx < sizeof(buffer); i++) {
+    for (int i = 0; i < arg_int; i++) {
+      // 如果缓冲即将写满，先发送已有数据再继续累加（避免丢弃多余字节）
+      if (buf_idx >= sizeof(buffer)) {
+        // 触发发送当前缓冲（同步于 I2C 设备句柄）
+        if (display_dev_handle != NULL) {
+          // 分段发送已有数据
+          size_t off = 0;
+          while (off < buf_idx) {
+            size_t chunk = (buf_idx - off) > I2C_TX_CHUNK_SIZE ? I2C_TX_CHUNK_SIZE : (buf_idx - off);
+            esp_err_t tret = ESP_FAIL;
+            for (int attempt = 0; attempt < 3; attempt++) {
+              tret = i2c_master_transmit(display_dev_handle, &buffer[off], chunk, pdMS_TO_TICKS(200));
+              if (tret == ESP_OK) break;
+              vTaskDelay(pdMS_TO_TICKS(5));
+            }
+            if (tret != ESP_OK) {
+              ESP_LOGW(BOARD_TAG, "I2C chunk transmit failed during SEND: %d", tret);
+              break;
+            }
+            off += chunk;
+          }
+        }
+        buf_idx = 0;
+      }
       buffer[buf_idx++] = data[i];
     }
     break;
@@ -46,37 +72,27 @@ static uint8_t u8g2_esp32_i2c_byte_cb(u8x8_t *u8x8, uint8_t msg,
   case U8X8_MSG_BYTE_END_TRANSFER: {
     if (display_dev_handle == NULL) return 0;
 
-    static int i2c_fail_streak = 0;
-    esp_err_t ret = ESP_OK;
-
-    // 尝试多次传输以提升鲁棒性
-    const int max_attempts = 3;
-    for (int attempt = 0; attempt < max_attempts; attempt++) {
-      ret = i2c_master_transmit(display_dev_handle, buffer, buf_idx, pdMS_TO_TICKS(100));
-      if (ret == ESP_OK) break;
-      ESP_LOGW(BOARD_TAG, "I2C transmit attempt %d failed: %d", attempt + 1, ret);
-      vTaskDelay(pdMS_TO_TICKS(5));
-    }
-
-    if (ret != ESP_OK) {
-      ESP_LOGE(BOARD_TAG, "I2C transfer failed after %d attempts: %d (len=%d)", max_attempts, ret, buf_idx);
-
-      // 增强恢复：对连续失败进行计数，超过阈值尝试重置 I2C 总线
-      i2c_fail_streak++;
-      if (i2c_fail_streak > 5) {
-        ESP_LOGW(BOARD_TAG, "I2C fail streak >5, attempting bus reset");
-        // 尝试软件复位 bus（驱动会重新初始化硬件控制器）
-        i2c_master_bus_reset(board_i2c_bus_handle);
-        // 给总线一点时间恢复
-        vTaskDelay(pdMS_TO_TICKS(100));
-        i2c_fail_streak = 0;
+    // 将缓冲按小块分段发送，避免一次性超过 I2C 传输限制或 u8g2 发包较大导致丢弃
+    size_t off = 0;
+    while (off < buf_idx) {
+      size_t chunk = (buf_idx - off) > I2C_TX_CHUNK_SIZE ? I2C_TX_CHUNK_SIZE : (buf_idx - off);
+      esp_err_t tret = ESP_FAIL;
+      for (int attempt = 0; attempt < 3; attempt++) {
+        tret = i2c_master_transmit(display_dev_handle, &buffer[off], chunk, pdMS_TO_TICKS(200));
+        if (tret == ESP_OK) break;
+        ESP_LOGW(BOARD_TAG, "I2C chunk transmit attempt %d failed: %d", attempt + 1, tret);
+        vTaskDelay(pdMS_TO_TICKS(5));
       }
-
-      return 0;
-    } else {
-      // 成功则清零连续失败计数
-      i2c_fail_streak = 0;
+      if (tret != ESP_OK) {
+        ESP_LOGE(BOARD_TAG, "I2C chunk transfer failed: %d (off=%zu chunk=%zu)", tret, off, chunk);
+        // 尝试总线重置一次以恢复
+        i2c_master_bus_reset(board_i2c_bus_handle);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        return 0;
+      }
+      off += chunk;
     }
+    buf_idx = 0;
     break;
   }
 

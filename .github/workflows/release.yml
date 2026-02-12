@@ -2,20 +2,18 @@ name: Build & Merge Firmware
 
 on:
   push:
-    branches:
-      - master
-      - main
-    tags:
-      - "v*"
+    branches: [master, main]
+    tags: ["v*"]
   pull_request:
-    branches:
-      - master
+    branches: [master]
 
 permissions:
   contents: write
 
+# 在 Job 级别定义默认环境变量，防止 context 访问失败
 env:
-  FW_NAME: "bipupu_esp32c3_firmware.bin"
+  UPLOAD_NAME: "firmware_fallback.bin"
+
 jobs:
   build:
     name: Build for ESP32-C3
@@ -32,40 +30,42 @@ jobs:
         shell: bash
         run: |
           . $IDF_PATH/export.sh
-          # 1. 设定目标芯片
+          rm -f sdkconfig
           idf.py set-target esp32c3
-          
-          # 2. 编译项目 (会自动读取库内的 sdkconfig)
           idf.py build
-          
-          # 3. 使用原生命令合并固件 (自动处理偏移和 Flash 大小)
-          # 生成的文件默认在 build/merged-binary.bin
           idf.py merge-bin
 
       - name: Prepare Artifacts
+        id: prep
         shell: bash
         run: |
-          # 根据提交类型命名：是 tag 则用版本号，否则用 commit hash
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            export FW_NAME="bipupu_c3_${{ github.ref_name }}.bin"
+          DATETIME=$(TZ='Asia/Shanghai' date +'%Y%m%d_%H%M')
+          FINAL_NAME="bipupu_c3_${DATETIME}.bin"
+          
+          # 检查文件是否存在再操作，增加健壮性
+          if [ -f "build/merged-binary.bin" ]; then
+            cp build/merged-binary.bin "$FINAL_NAME"
+            echo "UPLOAD_NAME=$FINAL_NAME" >> $GITHUB_ENV
           else
-            export FW_NAME="bipupu_c3_${{ github.sha }}.bin"
+            echo "::error::Merged binary not found!"
+            exit 1
           fi
-          cp build/merged-binary.bin $FW_NAME
-          echo "FW_NAME=$FW_NAME" >> $GITHUB_ENV
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.FW_NAME }}
-          path: ${{ env.FW_NAME }}
+          # name 是 GitHub 页面显示的压缩包名，固定为 firmware 比较整洁
+          name: firmware-bin
+          # 使用 || 语法确保 path 永远有效
+          path: ${{ env.UPLOAD_NAME || 'build/merged-binary.bin' }}
           if-no-files-found: error
 
       - name: Create Release and Upload Asset
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: ${{ env.FW_NAME }}
+          # files 同样实装默认值保护
+          files: ${{ env.UPLOAD_NAME || 'build/merged-binary.bin' }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
