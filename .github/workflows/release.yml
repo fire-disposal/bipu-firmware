@@ -1,16 +1,24 @@
-name: Release Firmware
+name: Build & Merge Firmware
 
 on:
   push:
+    branches:
+      - master
+      - main
     tags:
       - "v*"
+  pull_request:
+    branches:
+      - master
 
 permissions:
   contents: write
 
+env:
+  FW_NAME: "bipupu_esp32c3_firmware.bin"
 jobs:
   build:
-    name: Build & Release
+    name: Build for ESP32-C3
     runs-on: ubuntu-latest
     container: espressif/idf:v5.5.2
 
@@ -20,38 +28,44 @@ jobs:
         with:
           submodules: 'recursive'
 
-      - name: Build Firmware
+      - name: Build and Merge Firmware
         shell: bash
         run: |
           . $IDF_PATH/export.sh
-          # 确保在正确的目录下编译
-          idf.py set-target esp32s3
+          # 1. 设定目标芯片
+          idf.py set-target esp32c3
+          
+          # 2. 编译项目 (会自动读取库内的 sdkconfig)
           idf.py build
+          
+          # 3. 使用原生命令合并固件 (自动处理偏移和 Flash 大小)
+          # 生成的文件默认在 build/merged-binary.bin
+          idf.py merge-bin
 
-      - name: Merge Binaries
+      - name: Prepare Artifacts
         shell: bash
         run: |
-          . $IDF_PATH/export.sh
-          # 使用 esptool 合并固件
-          # 地址: bootloader @ 0x0, partition-table @ 0x8000, app @ 0x10000
-          esptool.py --chip esp32s3 merge_bin \
-            -o build/merged_firmware.bin \
-            --flash_mode dio \
-            --flash_size 16MB \
-            --flash_freq 80m \
-            0x0 build/bootloader/bootloader.bin \
-            0x8000 build/partition_table/partition-table.bin \
-            0x10000 build/bp_pager.bin
+          # 根据提交类型命名：是 tag 则用版本号，否则用 commit hash
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            export FW_NAME="bipupu_c3_${{ github.ref_name }}.bin"
+          else
+            export FW_NAME="bipupu_c3_${{ github.sha }}.bin"
+          fi
+          cp build/merged-binary.bin $FW_NAME
+          echo "FW_NAME=$FW_NAME" >> $GITHUB_ENV
 
-      - name: Rename Firmware
-        run: |
-          mv build/merged_firmware.bin build/bipupu_firmware_${{ github.ref_name }}.bin
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.FW_NAME }}
+          path: ${{ env.FW_NAME }}
+          if-no-files-found: error
 
       - name: Create Release and Upload Asset
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: build/bipupu_firmware_${{ github.ref_name }}.bin
+          files: ${{ env.FW_NAME }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

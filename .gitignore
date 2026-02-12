@@ -59,7 +59,7 @@ flash_app_args
 flash_bootloader_args
 
 # ESP-IDF component manager
-dependencies.lock
+# dependencies.lock
 managed_components/
 
 # IDE specific files
@@ -102,7 +102,7 @@ build.ninja
 gdbinit/
 
 # Partition table
-partitions.csv
+# partitions.csv
 partitions.bin
 
 # Certificates
