@@ -3,14 +3,12 @@ name: Build & Merge Firmware
 on:
   push:
     branches: [master, main]
-    tags: ["v*"]
   pull_request:
     branches: [master]
 
 permissions:
   contents: write
 
-# 在 Job 级别定义默认环境变量，防止 context 访问失败
 env:
   UPLOAD_NAME: "firmware_fallback.bin"
 
@@ -40,9 +38,10 @@ jobs:
         shell: bash
         run: |
           DATETIME=$(TZ='Asia/Shanghai' date +'%Y%m%d_%H%M')
-          FINAL_NAME="bipupu_c3_${DATETIME}.bin"
+          # 加入短哈希，方便在 Release 页面区分不同提交的固件
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+          FINAL_NAME="bipupu_c3_${DATETIME}_${SHORT_SHA}.bin"
           
-          # 检查文件是否存在再操作，增加健壮性
           if [ -f "build/merged-binary.bin" ]; then
             cp build/merged-binary.bin "$FINAL_NAME"
             echo "UPLOAD_NAME=$FINAL_NAME" >> $GITHUB_ENV
@@ -51,21 +50,19 @@ jobs:
             exit 1
           fi
 
-      - name: Upload Build Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          # name 是 GitHub 页面显示的压缩包名，固定为 firmware 比较整洁
-          name: firmware-bin
-          # 使用 || 语法确保 path 永远有效
-          path: ${{ env.UPLOAD_NAME || 'build/merged-binary.bin' }}
-          if-no-files-found: error
-
-      - name: Create Release and Upload Asset
+      - name: Create or Update Latest Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        # 注意：这里移除了 if 限制，所有推送都会运行
         with:
-          # files 同样实装默认值保护
-          files: ${{ env.UPLOAD_NAME || 'build/merged-binary.bin' }}
-          generate_release_notes: true
+          tag_name: latest  # 始终将固件推送到名为 'latest' 的 Release
+          name: "Latest Continuous Build"
+          body: "Last updated on ${{ github.event.head_commit.timestamp }} (Commit: ${{ github.sha }})"
+          # 使用通配符确保不管文件名怎么变，只要是 .bin 都会被上传
+          files: |
+            *.bin
+          # 设为预发布，这样它会排在正式版本之前，且适合频繁更新
+          prerelease: true
+          # 覆盖已存在的同名文件
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
