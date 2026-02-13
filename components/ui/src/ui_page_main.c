@@ -46,7 +46,9 @@ static void on_key(board_key_t key) {
             // 确认键：进入消息列表（如果有消息）
             if (ui_get_message_count() > 0) {
                 ESP_LOGD(TAG, "Entering message list");
-                ui_set_current_message_idx(0);
+                // 更友好的默认选中：跳转到最近一条消息
+                int cnt = ui_get_message_count();
+                if (cnt > 0) ui_set_current_message_idx(cnt - 1);
                 ui_change_page(UI_STATE_MESSAGE_LIST);
             }
             break;
@@ -54,7 +56,8 @@ static void on_key(board_key_t key) {
         case BOARD_KEY_DOWN:
             // 下键：进入消息列表
             if (ui_get_message_count() > 0) {
-                ui_set_current_message_idx(0);
+                int cnt = ui_get_message_count();
+                if (cnt > 0) ui_set_current_message_idx(cnt - 1);
                 ui_change_page(UI_STATE_MESSAGE_LIST);
             }
             break;

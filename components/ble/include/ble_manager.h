@@ -126,12 +126,6 @@ uint32_t ble_manager_get_error_count(void);
 /* ================== 数据更新 ================== */
 
 /**
- * @brief 更新电池电量
- * @param level 电量百分比 (0-100)
- */
-void ble_manager_update_battery_level(uint8_t level);
-
-/**
  * @brief BLE 轮询处理
  */
 void ble_manager_poll(void);

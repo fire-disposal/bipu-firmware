@@ -26,9 +26,6 @@ void app_battery_tick(void)
     // 获取电池状态
     uint8_t battery_level = board_battery_percent();
     
-    // 通过 BLE 更新电池电量
-    ble_manager_update_battery_level(battery_level);
-
     // 定期打印日志（避免过多日志）
     if (now - s_last_log >= BATTERY_LOG_INTERVAL_MS) {
         s_last_log = now;

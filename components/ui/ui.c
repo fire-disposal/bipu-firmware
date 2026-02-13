@@ -92,6 +92,21 @@ void ui_change_page(ui_state_enum_t new_state) {
         return;
     }
     
+    // Validate transitions: do not enter message-related pages when there are no messages
+    if ((new_state == UI_STATE_MESSAGE_LIST || new_state == UI_STATE_MESSAGE_READ) && s_ui.message_count == 0) {
+        ESP_LOGW(UI_TAG, "Attempt to enter message page but no messages exist, redirecting to MAIN");
+        new_state = UI_STATE_MAIN;
+    }
+    
+    // Ensure current index is within valid range when entering message pages
+    if (new_state == UI_STATE_MESSAGE_LIST || new_state == UI_STATE_MESSAGE_READ) {
+        if (s_ui.current_msg_idx < 0) s_ui.current_msg_idx = 0;
+        if (s_ui.current_msg_idx >= s_ui.message_count && s_ui.message_count > 0) {
+            // default to the most recent message for better UX
+            s_ui.current_msg_idx = s_ui.message_count - 1;
+        }
+    }
+    
     // 调用旧页面的 exit
     if (s_ui.state != UI_STATE_STANDBY && s_pages[s_ui.state] && s_pages[s_ui.state]->on_exit) {
         ESP_LOGD(UI_TAG, "Calling exit handler for state %d", s_ui.state);
@@ -167,8 +182,9 @@ void ui_tick(void) {
             s_pages[s_ui.state]->tick();
         }
     } else {
-        // 在待机状态下，我们仍然需要检查按键来唤醒
-        ESP_LOGD(UI_TAG, "In standby state, waiting for key press");
+        // 在待机状态下，周期性渲染屏保并等待按键唤醒
+        ui_render_standby();
+        ESP_LOGD(UI_TAG, "In standby state, rendered standby frame");
     }
 
     ui_unlock();
@@ -246,7 +262,9 @@ void ui_show_message(const char* sender, const char* text) {
 
 void ui_enter_standby(void) {
     if (s_ui.state != UI_STATE_STANDBY) {
-        s_ui.state = UI_STATE_STANDBY;
+        // 使用统一的页面切换流程以触发当前页面的 exit handler
+        ui_change_page(UI_STATE_STANDBY);
+        // 渲染待机屏保
         ui_render_standby();
         // 进入待机时，只有手电筒未开启才关闭LED
         if (!s_ui.flashlight_on) {
@@ -254,6 +272,10 @@ void ui_enter_standby(void) {
         }
         ESP_LOGI(UI_TAG, "Entered standby");
     }
+}
+
+bool ui_is_in_standby(void) {
+    return s_ui.state == UI_STATE_STANDBY;
 }
 
 void ui_wake_up(void) {

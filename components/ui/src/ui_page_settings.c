@@ -14,6 +14,7 @@ static const char* TAG = "PAGE_SETTINGS";
 typedef enum {
     SETTING_BRIGHTNESS,    // 亮度调节
     SETTING_FLASHLIGHT,    // 手电筒开关
+    SETTING_LOCKSCREEN,    // 锁屏立即进入屏保
     SETTING_ABOUT,         // 关于设备
     SETTING_BACK,          // 返回
     SETTING_COUNT
@@ -22,6 +23,7 @@ typedef enum {
 static const char* s_setting_names[] = {
     "屏幕亮度",
     "手电筒",
+    "锁屏",
     "关于",
     "← 返回"
 };
@@ -70,10 +72,9 @@ static void render_settings(void) {
     ui_draw_text_centered(0, 10, 128, "设置");
     
     // 设置项列表
-    // 可用区域：标题分割线(y=13) 到底部分割线(y=52)
-    // 4 项 x 9px 行高，紧凑排列
-    const int line_height = 9;
-    const int start_y = 22;
+    // 使用与列表页相同的行高与起始 Y，以保证文字与选中背景对齐
+    const int line_height = 12;
+    const int start_y = 24;
     
     for (int i = 0; i < SETTING_COUNT; i++) {
         int y = start_y + i * line_height;
@@ -114,6 +115,9 @@ static void render_settings(void) {
                 break;
             }
             case SETTING_ABOUT:
+            case SETTING_LOCKSCREEN:
+                // 无值显示
+                break;
             case SETTING_BACK:
                 // 不显示值
                 break;
@@ -193,6 +197,10 @@ static void on_key(board_key_t key) {
                         break;
                     case SETTING_FLASHLIGHT:
                         ui_toggle_flashlight();
+                        break;
+                    case SETTING_LOCKSCREEN:
+                        // 立即进入屏保/锁屏
+                        ui_enter_standby();
                         break;
                     case SETTING_ABOUT:
                         s_show_about = true;

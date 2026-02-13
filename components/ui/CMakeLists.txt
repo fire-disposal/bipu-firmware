@@ -10,6 +10,7 @@ idf_component_register(
         "src/ui_page_settings.c"
     INCLUDE_DIRS
         "include"
+        "."
     REQUIRES
         board storage
     PRIV_REQUIRES

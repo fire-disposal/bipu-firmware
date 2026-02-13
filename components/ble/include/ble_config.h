@@ -50,12 +50,6 @@ extern "C" {
 #define NUS_CHAR_TX_UUID_STR      "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 #define NUS_CHAR_RX_UUID_STR      "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
-/* ================== Battery Service (标准 BLE 服务) ================== */
-// 服务 UUID: 0x180F
-#define BATTERY_SERVICE_UUID      0x180F
-// Battery Level 特征: 0x2A19
-#define BATTERY_LEVEL_UUID        0x2A19
-
 /* ================== Current Time Service (CTS, 标准 BLE 服务) ================== */
 // 服务 UUID: 0x1805
 #define CTS_SERVICE_UUID          0x1805

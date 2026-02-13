@@ -102,6 +102,19 @@ void app_main(void)
         ESP_LOGI(MAIN_TAG, "应用层初始化成功");
     }
 
+    // 步骤3.1: 系统就绪，短震动一次以提示用户（在蓝牙广播前完成）
+    ESP_LOGI(MAIN_TAG, "系统就绪，执行开机短震动");
+    board_vibrate_on(VIBRATE_STARTUP_MS);
+    // 等待震动结束以保证用户能感知（阻塞短时间，通常 <= 1s）
+    vTaskDelay(pdMS_TO_TICKS(VIBRATE_STARTUP_MS + 50));
+    board_vibrate_off();
+
+    // 步骤3.2: 启动应用级服务（由 app 组件负责启动 BLE 等）
+    esp_err_t srv_ret = app_start_services();
+    if (srv_ret != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "app_start_services returned %s", esp_err_to_name(srv_ret));
+    }
+
     // 步骤4: 创建应用主任务（双核芯片绑 Core 1 避让 BLE，单核芯片绑 Core 0）
     BaseType_t xReturned = xTaskCreatePinnedToCore(
         app_task,

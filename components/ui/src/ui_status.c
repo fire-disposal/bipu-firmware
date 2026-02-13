@@ -50,18 +50,9 @@ void ui_status_render(const char* center_text)
         board_display_text(15, 9, "*");
     }
 
-    // 中部文本或时间（小字体）
-    char buf[32];
+    // 中部区域：默认不再显示系统时间（主界面已有电子钟）
+    // 仅在调用者提供 center_text 时显示文本，其他情况保持空白以避免重复
     const char* text = center_text;
-    if (!text) {
-        time_t now; time(&now);
-        struct tm *t = localtime(&now);
-        if (t) {
-            strftime(buf, sizeof(buf), "%H:%M", t);
-            text = buf;
-        }
-    }
-
     if (text) {
         const int left_margin = 22;
         const int right_margin = 24;

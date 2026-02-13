@@ -40,6 +40,9 @@ void ui_delete_current_message(void);
 void ui_enter_standby(void);
 void ui_wake_up(void);
 
+// 查询是否处于待机屏保状态
+bool ui_is_in_standby(void);
+
 /* ================== 手电筒接口 ================== */
 bool ui_is_flashlight_on(void);
 void ui_toggle_flashlight(void);

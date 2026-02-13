@@ -10,7 +10,6 @@
 
 #include "ble_manager.h"
 #include "ble_nus_service.h"
-#include "ble_battery_service.h"
 #include "ble_cts_service.h"
 #include "ble_protocol.h"
 
@@ -25,7 +24,9 @@
 #include "esp_nimble_hci.h"
 #include "nvs_flash.h"
 #include "storage.h"
+#include "freertos/task.h"
 #include <string.h>
+#include "board_hal.h"
 
 static const char* TAG = "ble_manager";
 
@@ -233,11 +234,26 @@ static void ble_advertise(void)
     adv_params.itvl_min = BLE_ADV_INTERVAL_MIN;
     adv_params.itvl_max = BLE_ADV_INTERVAL_MAX;
 
+
+    ESP_LOGD(TAG, "Starting advertise: addr_type=%d itvl_min=%d itvl_max=%d",
+             s_own_addr_type, adv_params.itvl_min, adv_params.itvl_max);
+
+    /* 尝试先停止任何可能正在运行的广播以清理状态 */
+    int stop_rc = ble_gap_adv_stop();
+    ESP_LOGD(TAG, "ble_gap_adv_stop returned %d before start", stop_rc);
+
     rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER,
                            &adv_params, ble_gap_event, NULL);
     if (rc != 0) {
         ESP_LOGE(TAG, "Error enabling advertisement; rc=%d", rc);
-        return;
+        // 尝试短延迟后重试一次，以处理 race 或临时状态问题
+        vTaskDelay(pdMS_TO_TICKS(200));
+        rc = ble_gap_adv_start(s_own_addr_type, NULL, BLE_HS_FOREVER,
+                               &adv_params, ble_gap_event, NULL);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "Retry enabling advertisement failed; rc=%d", rc);
+            return;
+        }
     }
 
     s_ble_state = BLE_STATE_ADVERTISING;
@@ -277,7 +293,26 @@ static void ble_on_sync(void)
     s_ble_state = BLE_STATE_INITIALIZED;
     ESP_LOGI(TAG, "BLE host synchronized");
 
-    // 开始广播
+    // 延迟3秒后开始广播（再等待 I2C 初始化完成，最多再等 5 秒）
+    vTaskDelay(pdMS_TO_TICKS(3000));
+
+    // 如果 board_i2c_bus_handle 为空，说明 I2C/显示尚未初始化，等待其就绪
+    const uint32_t max_wait_ms = 5000;
+    uint32_t waited = 0;
+    const uint32_t poll_ms = 200;
+    while (board_i2c_bus_handle == NULL && waited < max_wait_ms) {
+        ESP_LOGD(TAG, "Waiting for I2C bus to initialize before advertising... (%ums)", waited);
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
+        waited += poll_ms;
+    }
+    if (board_i2c_bus_handle == NULL) {
+        ESP_LOGW(TAG, "I2C bus not ready after %ums, proceeding to advertise anyway", waited);
+    } else {
+        ESP_LOGI(TAG, "I2C bus ready after %ums, starting advertising", waited);
+        // 给外设一点时间稳定
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
     ble_advertise();
 }
 
@@ -337,12 +372,6 @@ static int gatt_svr_init(void)
         return rc;
     }
     ble_nus_service_set_callback(nus_message_handler);
-
-    rc = ble_battery_service_init();
-    if (rc != 0) {
-        ESP_LOGE(TAG, "Failed to init Battery service; rc=%d", rc);
-        return rc;
-    }
 
     rc = ble_cts_service_init();
     if (rc != 0) {
@@ -421,7 +450,6 @@ esp_err_t ble_manager_deinit(void)
 
     // 反初始化服务
     ble_nus_service_deinit();
-    ble_battery_service_deinit();
     ble_cts_service_deinit();
 
     // 停止 NimBLE
@@ -505,10 +533,6 @@ void ble_manager_poll(void)
     // NimBLE 使用事件驱动，无需轮询
 }
 
-void ble_manager_update_battery_level(uint8_t level)
-{
-    ble_battery_service_update_level(level);
-}
 
 uint16_t ble_manager_get_conn_id(void)
 {
