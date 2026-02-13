@@ -28,7 +28,7 @@
 #define BATTERY_VOLTAGE_MAX          5.0f   // 最大合理电压 (考虑充电时)
 
 // ADC 采样缓存间隔（无论外部调用频率如何，实际采样不超过此频率）
-#define ADC_SAMPLE_INTERVAL_MS       30000U // 30秒采样一次（电池变化极慢）
+#define ADC_SAMPLE_INTERVAL_MS       5000U // 5秒采样一次（更频繁检测电压变化）
 
 // 全局句柄
 static adc_oneshot_unit_handle_t s_adc1_handle = NULL;
