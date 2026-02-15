@@ -47,6 +47,7 @@ static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 // 消息缓冲区（用于分块接收）
 static uint8_t s_rx_buffer[BLE_MAX_MESSAGE_LEN];
 static uint16_t s_rx_len = 0;
+static bool s_waiting_message = false; // true when receiving multi-packet A2 message
 
 /* ================== 私有函数 ================== */
 
@@ -57,26 +58,94 @@ static void handle_rx_data(const uint8_t* data, uint16_t len)
 {
     if (!data || len == 0) return;
 
-    // 追加到缓冲区
-    if (s_rx_len + len > BLE_MAX_MESSAGE_LEN) {
-        ESP_LOGW(TAG, "Message buffer overflow, resetting");
-        s_rx_len = 0;
+    // 支持两种首包协议头：0xA1 (时间同步，后续10字节为 CTS 格式)、0xA2 (消息推送，后续为 UTF-8 分包)
+    const uint8_t *buf = data;
+
+    // 如果当前正在接收 A2 分包消息（首包已收到 0xA2），则直接追加并检查结束符
+    if (s_waiting_message) {
+        if (s_rx_len + len > BLE_MAX_MESSAGE_LEN) {
+            ESP_LOGW(TAG, "Message buffer overflow while receiving fragments, resetting");
+            s_rx_len = 0;
+            s_waiting_message = false;
+            return;
+        }
+        memcpy(s_rx_buffer + s_rx_len, buf, len);
+        s_rx_len += len;
+
+        // 查看是否包含结束符 '\0' 或 '\n'
+        for (uint16_t i = 0; i < s_rx_len; i++) {
+            if (s_rx_buffer[i] == '\0' || s_rx_buffer[i] == '\n') {
+                // 调用回调并重置
+                s_rx_buffer[i] = '\0';
+                ESP_LOGI(TAG, "Received complete A2 message (%d bytes): %s", i, (char*)s_rx_buffer);
+                if (s_callback) {
+                    s_callback((const char*)s_rx_buffer, (uint16_t)(i));
+                }
+                s_rx_len = 0;
+                s_waiting_message = false;
+                return;
+            }
+        }
+
+        // 未找到结束符，等待更多分片
+        ESP_LOGI(TAG, "Received A2 fragment, total %d bytes", s_rx_len);
+        return;
     }
 
-    memcpy(s_rx_buffer + s_rx_len, data, len);
-    s_rx_len += len;
-
-    // 确保字符串以 null 结尾
-    s_rx_buffer[s_rx_len] = '\0';
-
-    ESP_LOGI(TAG, "Received message (%d bytes): %s", s_rx_len, s_rx_buffer);
-
-    // 调用回调
-    if (s_callback) {
-        s_callback((const char*)s_rx_buffer, s_rx_len);
+    // 非分片场景：检查首字节
+    if (len > 0 && buf[0] == 0xA1) {
+        // 时间同步包，期望至少 1(header)+10(payload)=11字节
+        if (len >= 11) {
+            // 直接把完整数据传给上层回调（保留原始格式，应用可调用解析函数）
+            if (s_callback) {
+                // 回调接收指针从 header 开始，长度为 11
+                s_callback((const char*)buf, 11);
+            }
+            // 若还有多余字节，则尝试作为新消息继续处理（递归处理剩余）
+            if (len > 11) {
+                handle_rx_data(buf + 11, (uint16_t)(len - 11));
+            }
+            return;
+        } else {
+            // 不足则缓存，等待后续分片补全
+            if (len > BLE_MAX_MESSAGE_LEN) return;
+            memcpy(s_rx_buffer, buf, len);
+            s_rx_len = len;
+            ESP_LOGI(TAG, "Receiving A1 partial (%d bytes), waiting for more", s_rx_len);
+            return;
+        }
     }
 
-    // 重置缓冲区
+    if (len > 0 && buf[0] == 0xA2) {
+        // 首包为消息推送，取 header 之后的数据作为消息首段
+        uint16_t payload_len = (len > 1) ? (len - 1) : 0;
+        if (payload_len > BLE_MAX_MESSAGE_LEN) payload_len = BLE_MAX_MESSAGE_LEN;
+        if (payload_len > 0) memcpy(s_rx_buffer, buf + 1, payload_len);
+        s_rx_len = payload_len;
+        s_waiting_message = true;
+
+        // 如果首包包含结束符，则直接完成
+        for (uint16_t i = 0; i < s_rx_len; i++) {
+            if (s_rx_buffer[i] == '\0' || s_rx_buffer[i] == '\n') {
+                s_rx_buffer[i] = '\0';
+                ESP_LOGI(TAG, "Received complete A2 message in first packet: %s", (char*)s_rx_buffer);
+                if (s_callback) s_callback((const char*)s_rx_buffer, (uint16_t)(i));
+                s_rx_len = 0;
+                s_waiting_message = false;
+                return;
+            }
+        }
+
+        ESP_LOGI(TAG, "Started receiving A2 message, %d bytes so far", s_rx_len);
+        return;
+    }
+
+    // 其他：当作普通文本立即回调
+    if (len > BLE_MAX_MESSAGE_LEN) len = BLE_MAX_MESSAGE_LEN;
+    memcpy(s_rx_buffer, buf, len);
+    s_rx_buffer[len] = '\0';
+    ESP_LOGI(TAG, "Received plain message (%d bytes): %s", len, (char*)s_rx_buffer);
+    if (s_callback) s_callback((const char*)s_rx_buffer, (uint16_t)len);
     s_rx_len = 0;
 }
 

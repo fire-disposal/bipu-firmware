@@ -3,7 +3,6 @@ idf_component_register(
         "ble_manager.c"
         "src/ble_protocol.c"
         "src/ble_nus_service.c"
-        "src/ble_cts_service.c"
     INCLUDE_DIRS 
         "include"
     REQUIRES 

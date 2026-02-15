@@ -10,7 +10,6 @@
 
 #include "ble_manager.h"
 #include "ble_nus_service.h"
-#include "ble_cts_service.h"
 #include "ble_protocol.h"
 
 #include "nimble/nimble_port.h"
@@ -19,6 +18,7 @@
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
+#include "host/ble_store.h"
 
 #include "esp_log.h"
 #include "esp_nimble_hci.h"
@@ -55,11 +55,40 @@ static void ble_advertise(void);
  */
 static void nus_message_handler(const char* message, uint16_t len)
 {
-    if (!s_message_callback || !message) return;
+    if (!message || len == 0) return;
 
+    const uint8_t *data = (const uint8_t*)message;
+
+    // 时间同步 (A1): 首包格式为 0xA1 + 10 字节 CTS 数据
+    if (data[0] == 0xA1) {
+        if (len >= 11) {
+            ble_cts_time_t cts_time;
+            if (ble_protocol_parse_cts_time(data + 1, 10, &cts_time)) {
+                if (s_cts_time_callback) {
+                    s_cts_time_callback(&cts_time);
+                }
+            }
+        } else {
+            ESP_LOGW(TAG, "Received A1 time packet too short: %d bytes", len);
+        }
+        return;
+    }
+
+    // 消息推送 (A2 或纯文本)：如果首字节为 0xA2，则后续为 UTF-8 负载；否则当作文本
+    if (data[0] == 0xA2) {
+        // payload 从 data+1 开始，长度 len-1
+        if (len <= 1) return;
+        ble_parsed_msg_t parsed;
+        if (ble_protocol_parse_text((const char*)(data + 1), (uint16_t)(len - 1), &parsed)) {
+            if (s_message_callback) s_message_callback(parsed.sender, parsed.message, &parsed.effect);
+        }
+        return;
+    }
+
+    // 普通文本或旧二进制协议
     ble_parsed_msg_t parsed;
-    if (ble_protocol_parse_text(message, len, &parsed)) {
-        s_message_callback(parsed.sender, parsed.message, &parsed.effect);
+    if (ble_protocol_parse((const uint8_t*)data, len, &parsed)) {
+        if (s_message_callback) s_message_callback(parsed.sender, parsed.message, &parsed.effect);
     }
 }
 
@@ -290,6 +319,10 @@ static void ble_on_sync(void)
     ble_hs_id_copy_addr(s_own_addr_type, addr_val, NULL);
     print_addr(addr_val);
 
+    // 配置安全参数：使用 Just Works（无 IO）并开启 Bonding
+    ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
+    ble_hs_cfg.sm_bonding = 1;
+
     s_ble_state = BLE_STATE_INITIALIZED;
     ESP_LOGI(TAG, "BLE host synchronized");
 
@@ -373,11 +406,7 @@ static int gatt_svr_init(void)
     }
     ble_nus_service_set_callback(nus_message_handler);
 
-    rc = ble_cts_service_init();
-    if (rc != 0) {
-        ESP_LOGE(TAG, "Failed to init CTS service; rc=%d", rc);
-        return rc;
-    }
+    // CTS 服务已移除；时间同步通过 NUS 协议头 (0xA1) 实现
 
     // 设置设备名称
     rc = ble_svc_gap_device_name_set(BLE_DEVICE_NAME);
@@ -450,7 +479,6 @@ esp_err_t ble_manager_deinit(void)
 
     // 反初始化服务
     ble_nus_service_deinit();
-    ble_cts_service_deinit();
 
     // 停止 NimBLE
     int rc = nimble_port_stop();
@@ -505,7 +533,6 @@ void ble_manager_set_message_callback(ble_message_callback_t callback)
 void ble_manager_set_cts_time_callback(ble_cts_time_callback_t callback)
 {
     s_cts_time_callback = callback;
-    ble_cts_service_set_time_callback(callback);
 }
 
 bool ble_manager_is_connected(void)
@@ -537,4 +564,31 @@ void ble_manager_poll(void)
 uint16_t ble_manager_get_conn_id(void)
 {
     return s_conn_handle;
+}
+
+esp_err_t ble_manager_unbind(void)
+{
+    ESP_LOGI(TAG, "Clearing BLE bonding store and saved address");
+
+    // 如果有连接，先断开
+    if (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    // 清除 NimBLE 存储的绑定信息（使用 nimble/esp-idf 提供的接口）
+    int rc = ble_store_clear();
+    if (rc != 0) {
+        ESP_LOGW(TAG, "ble_store_clear returned %d", rc);
+    } else {
+        ESP_LOGI(TAG, "BLE store cleared");
+    }
+
+    // 清除保存的地址
+    storage_save_ble_addr("");
+
+    // 重新开始广播
+    ble_advertise();
+
+    return ESP_OK;
 }

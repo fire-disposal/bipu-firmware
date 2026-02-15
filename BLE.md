@@ -1,122 +1,96 @@
-# 蓝牙协议细节文档
+这是一份为您专门整理的蓝牙通信接口规范文档。它结合了 **Nordic UART Service (NUS)** 的私有协议封装、**系统级绑定安全机制**以及 **ESP32-C3 (NimBLE)** 的底层实现要求。
 
-## 概述
+---
 
-本协议基于 BLE (Bluetooth Low Energy) 实现 Flutter 应用与 ESP32 设备的通信。主要用于消息转发，支持可选的电池监控和时间同步功能。
+# 蓝牙通信接口规范文档 (V1.0) - 类寻呼机设备
 
-## BLE 服务和特征
+## 1. 物理层与广播规范 (GAP)
 
-### 1. Nordic UART Service (NUS) - 消息转发服务
-**服务 UUID**: `6e400001-b5a3-f393-e0a9-e50e24dcca9e`
+为了保证连接稳定性及系统级列表可见性，设备必须满足以下要求：
 
-#### 特征详情
+* **广播模式**：使用 `General Discoverable Mode` (可发现) 及 `Connectable Mode` (可连接)。
+* **设备外观 (Appearance)**：建议设置为 `0x00C0` (Generic Keyring) 或 `0x0180` (Generic Remote Control)。
+* **系统列表可见性**：必须在广播数据包 (Advertising Data) 中包含 **Complete Local Name**。
+* **自动回连**：支持 **Whitelist Filter Policy**，优先允许已绑定设备连接。
 
-| 特征名称 | UUID | 属性 | 描述 | 数据类型 |
-|----------|------|------|------|----------|
-| TX (发送) | `6e400002-b5a3-f393-e0a9-e50e24dcca9e` | Write (Without Response) | Flutter 应用写入消息数据到设备 | UTF-8 字节数组 |
-| RX (接收) | `6e400003-b5a3-f393-e0a9-e50e24dcca9e` | Notify, Read | 设备发送响应或数据到 Flutter 应用 | UTF-8 字节数组 |
+---
 
-### 2. 电池服务 (Battery Service) - 可选
-**服务 UUID**: `0000180f-0000-1000-8000-00805f9b34fb`
+## 2. 安全与绑定规范 (Storage & Security)
 
-#### 特征详情
+设备必须支持 **Bonding (绑定)** 并在重启后持久化密钥。
 
-| 特征名称 | UUID | 属性 | 描述 | 数据类型 |
-|----------|------|------|------|----------|
-| 电池电量 | `00002a19-0000-1000-8000-00805f9b34fb` | Notify, Read | 报告电池电量百分比 | uint8 (0-100) |
+### 2.1 安全参数设置
 
-### 3. 当前时间服务 (Current Time Service) - 可选
-**服务 UUID**: `00001805-0000-1000-8000-00805f9b34fb`
+* **IO Capabilities**: `BLE_HS_IO_NO_INPUT_OUTPUT` (开启 Just Works 配对)。
+* **Bonding**: 开启 (`1`)。
+* **NVS 存储**: 必须调用 `nvs_flash_init()`，并配置 NimBLE 存储回调以保存 **LTK (长期密钥)**。
+* **解绑机制**: 硬件需预留物理组合键或长按逻辑，执行 `ble_store_clear_all()` 以清空 NVS 绑定信息。
 
-#### 特征详情
+### 2.2 权限控制
 
-| 特征名称 | UUID | 属性 | 描述 | 数据类型 |
-|----------|------|------|------|----------|
-| 当前时间 | `00002a2b-0000-1000-8000-00805f9b34fb` | Write, Read | 同步设备时间 | Exact Time 256 (10 字节) |
+* **NUS TX Characteristic**: 必须设置为 `BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC`。
+> *注：增加 `_ENC` 权限后，App 写入数据时手机系统会自动触发配对弹窗。*
 
-## 数据格式规范
 
-### 消息数据格式
-- **编码**: UTF-8
-- **最大长度**: 无限制（自动分块传输）
-- **分块大小**: MTU - 3 字节（默认 MTU=23, 分块=20 字节）
-- **示例**: `"From John: Hello World"`
 
-### 电池电量数据格式
-- **类型**: uint8
-- **范围**: 0-100 (%)
-- **字节序**: Little Endian
+---
 
-### 时间数据格式 (Exact Time 256)
-- **长度**: 10 字节
-- **结构**:
-  - 字节 0-1: 年 (uint16, Little Endian)
-  - 字节 2: 月 (uint8)
-  - 字节 3: 日 (uint8)
-  - 字节 4: 时 (uint8)
-  - 字节 5: 分 (uint8)
-  - 字节 6: 秒 (uint8)
-  - 字节 7: 星期 (uint8, 1=周一...7=周日)
-  - 字节 8: 毫秒高位 (uint8, 毫秒 * 256 / 1000)
-  - 字节 9: 调整原因 (uint8, 通常为 0)
+## 3. GATT 服务定义
 
-## 接口定义
+仅保留 **Nordic UART Service (NUS)** 作为数据通道，所有业务逻辑通过协议头区分。
 
-### BluetoothDeviceService 类接口
+* **Service UUID**: `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`
+* **Characteristic (RX/Write)**: `6E400002-B5A3-F393-E0A9-E50E24DCCA9E`
+* **Properties**: `Write`, `Write Without Response`
+* **Permissions**: `Encrypted Write`
 
-#### 主要方法
 
-| 方法名 | 参数 | 返回值 | 描述 |
-|--------|------|--------|------|
-| `connect(BluetoothDevice device)` | `BluetoothDevice` | `Future<void>` | 连接到 BLE 设备 |
-| `disconnect()` | 无 | `Future<void>` | 断开 BLE 连接 |
-| `forwardMessage(String message)` | `String` | `Future<void>` | 转发消息到设备 |
 
-#### 状态监听器
+---
 
-| 监听器 | 类型 | 描述 |
-|--------|------|------|
-| `connectionState` | `ValueNotifier<BluetoothConnectionState>` | 连接状态变化通知 |
-| `batteryLevel` | `ValueNotifier<int?>` | 电池电量变化通知 |
+## 4. 应用层通讯协议 (Packet Structure)
 
-## 通信流程
+所有通过 NUS 写入的数据包均采用：`[Header (1 Byte)] + [Payload (N Bytes)]` 格式。
 
-### 连接建立
-1. 扫描 BLE 设备
-2. 发现目标设备（通过服务 UUID 过滤）
-3. 建立连接
-4. 发现服务和特征
-5. 设置通知（电池电量、RX 特征）
+### 4.1 时间同步协议 (App -> Device)
 
-### 消息转发
-1. 接收应用层消息
-2. UTF-8 编码
-3. 根据 MTU 分块
-4. 逐块写入 TX 特征
-5. 设备接收并重组消息
+当 App 连接成功或需要校时时发送。
 
-### 时间同步（可选）
-1. 获取当前时间
-2. 格式化为 Exact Time 256
-3. 写入当前时间特征
+* **Header**: `0xA1`
+* **Payload**: 10 字节 (参考标准 CTS 格式)
 
-## 技术参数
+| 偏移 | 长度 | 定义 | 说明 |
+| --- | --- | --- | --- |
+| 0 | 1 | Header | 固定为 `0xA1` |
+| 1 | 2 | Year | uint16, 小端序 (e.g., 2026 = `0xEA 0x07`) |
+| 3 | 1 | Month | 1 - 12 |
+| 4 | 1 | Day | 1 - 31 |
+| 5 | 1 | Hour | 0 - 23 |
+| 6 | 1 | Minute | 0 - 59 |
+| 7 | 1 | Second | 0 - 59 |
+| 8 | 1 | Day of Week | 1=Monday...7=Sunday |
+| 9 | 1 | Fraction | 1/256th of a second |
+| 10 | 1 | Reason | 0 (Manual), 1 (External reference), etc. |
 
-- **BLE 版本**: 4.0+
-- **默认 MTU**: 23 字节
-- **最大分块大小**: MTU - 3 = 20 字节
-- **连接超时**: 15 秒
-- **消息轮询间隔**: 前台 15 秒，后台 5 分钟
+### 4.2 消息传输协议 (App -> Device)
 
-## 错误处理
+当 App 推送寻呼消息时发送。
 
-- 连接失败：自动重试或通知用户
-- 写入失败：记录日志，不中断流程
-- MTU 协商失败：使用默认值
+* **Header**: `0xA2`
+* **Payload**: UTF-8 编码的字符串数据
 
-## 兼容性
+**分包逻辑说明**：
 
-- **Flutter 端**: Flutter Blue Plus 库
-- **ESP32 端**: ESP-IDF NimBLE 栈
-- **Android/iOS**: 支持 BLE 4.0+ 设备</content>
-<parameter name="filePath">d:\code\project\bipupu_project\bipupu\flutter_user\bluetooth_protocol_details.md
+* App 会根据协商的 **MTU** 进行分包。
+* 首包包含 `0xA2`。后续分包不含 Header，直接拼接。
+* 硬件端建议使用缓冲区，直到收到完整的字符串（或根据业务约定的结束符判断）。
+
+---
+
+## 5. 稳定性增强建议 (重要)
+
+1. **MTU 协商**：硬件应支持响应手机发起的 MTU Exchange 请求（建议支持至 247 字节）。
+2. **底层保活**：由于开启了 `autoConnect` 和 `Bonding`，硬件应维持稳定的广播间隔（建议连接时 20ms - 50ms，待机时 100ms - 500ms）。
+3. **连接参数**：为了省电且不失响应速度，建议连接间隔 (Conn Interval) 设定在 `30ms - 100ms` 之间。
+
+---

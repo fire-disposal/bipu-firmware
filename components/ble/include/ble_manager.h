@@ -90,6 +90,12 @@ void ble_manager_set_message_callback(ble_message_callback_t callback);
  */
 void ble_manager_set_cts_time_callback(ble_cts_time_callback_t callback);
 
+/**
+ * @brief 清除所有绑定信息并移除已保存的配对地址
+ * @return ESP_OK 成功
+ */
+esp_err_t ble_manager_unbind(void);
+
 /* ================== 状态查询 ================== */
 
 /**
