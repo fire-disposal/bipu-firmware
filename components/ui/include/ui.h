@@ -51,6 +51,9 @@ void ui_toggle_flashlight(void);
 uint8_t ui_get_brightness(void);
 void ui_set_brightness(uint8_t level);
 
+/* ================== 系统控制接口 ================== */
+void ui_system_restart(void);
+
 #ifdef __cplusplus
 }
 #endif

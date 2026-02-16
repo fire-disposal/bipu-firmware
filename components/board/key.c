@@ -1,5 +1,5 @@
-#include "board.h"
-#include "board_hal.h"
+#include "board_pins.h"   // GPIO引脚定义
+#include "board.h"        // 公共接口
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include <string.h>
@@ -137,6 +137,7 @@ void board_key_init(void) {
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
+    
     esp_err_t ret = gpio_config(&key_config);
     if (ret != ESP_OK) {
         ESP_LOGE(BOARD_TAG, "GPIO config failed: %s", esp_err_to_name(ret));
@@ -158,7 +159,7 @@ void board_key_init(void) {
     }
     
     s_keys_initialized = true;
-    ESP_LOGI(BOARD_TAG, "Keys initialized");
+    ESP_LOGI(BOARD_TAG, "Keys initialized successfully");
 }
 
 /* ================== 输入接口实现 ================== */

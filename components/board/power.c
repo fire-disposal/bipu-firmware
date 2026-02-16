@@ -1,9 +1,10 @@
-#include "board.h"
-#include "board_hal.h"
+#include "board_pins.h"   // GPIO引脚定义
+#include "board.h"        // 公共接口
 #include "esp_log.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
+#include "esp_system.h"
 
 // 定义参数
 #define ADC_UNIT               ADC_UNIT_1
@@ -93,8 +94,7 @@ static bool power_adc_calibration_init(adc_unit_t unit, adc_channel_t channel, a
     return calibrated;
 }
 
-void board_power_init(void)
-{
+void board_power_init(void) {
     if (s_power_initialized) {
         ESP_LOGW(BOARD_TAG, "Power management already initialized");
         return;
@@ -133,7 +133,8 @@ void board_power_init(void)
     // 4. 校准初始化
     s_do_calibration = power_adc_calibration_init(unit, s_adc_channel, ADC_ATTEN, &s_adc_cali_handle);
     // 打印分压信息以便调试（例如：511k/511k）
-    ESP_LOGI(BOARD_TAG, "Voltage divider: Rtop=%.0fR Rbot=%.0fR ratio=%.3f", R_DIV_TOP_OHMS, R_DIV_BOTTOM_OHMS, VOLTAGE_DIVIDER_RATIO);
+    ESP_LOGI(BOARD_TAG, "Voltage divider: Rtop=%.0fR Rbot=%.0fR ratio=%.3f",
+             R_DIV_TOP_OHMS, R_DIV_BOTTOM_OHMS, VOLTAGE_DIVIDER_RATIO);
     
     // 5. 初始化充电检测相关变量（使用EMA）
     s_smoothed_voltage = 0.0f;
@@ -144,7 +145,7 @@ void board_power_init(void)
     s_last_voltage_check_time = 0;
     
     s_power_initialized = true;
-    ESP_LOGI(BOARD_TAG, "Power management initialized");
+    ESP_LOGI(BOARD_TAG, "Power management initialized successfully");
 }
 
 float board_battery_voltage(void)
@@ -281,4 +282,10 @@ bool board_battery_is_charging(void)
     power_update_charging_detection(current_voltage);
     
     return s_is_charging;
+}
+
+void board_system_restart(void)
+{
+    ESP_LOGI(BOARD_TAG, "System restart requested by user");
+    esp_restart();
 }

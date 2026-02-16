@@ -4,7 +4,6 @@
 #include "ui_render.h"
 #include "board.h"
 #include "storage.h"
-#include "app_effects.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -252,8 +251,6 @@ void ui_show_message(const char* sender, const char* text) {
     s_ui.current_msg_idx = s_ui.message_count - 1;
     ui_change_page(UI_STATE_MESSAGE_READ);
     board_notify();
-    // 来信提醒LED闪烁
-    app_effects_notify_blink(3000);
     // persist after adding
     storage_save_messages(s_ui.messages, s_ui.message_count, s_ui.current_msg_idx);
 
@@ -266,10 +263,7 @@ void ui_enter_standby(void) {
         ui_change_page(UI_STATE_STANDBY);
         // 渲染待机屏保
         ui_render_standby();
-        // 进入待机时，只有手电筒未开启才关闭LED
-        if (!s_ui.flashlight_on) {
-            board_leds_off();
-        }
+        // LED状态由app层在app_update_led_mode中管理
         ESP_LOGI(UI_TAG, "Entered standby");
     }
 }
@@ -317,14 +311,10 @@ bool ui_is_flashlight_on(void) {
 
 void ui_toggle_flashlight(void) {
     s_ui.flashlight_on = !s_ui.flashlight_on;
-    
+    // LED状态由app层在app_update_led_mode中根据flashlight状态更新
     if (s_ui.flashlight_on) {
-        // 点亮所有LED作为手电筒
-        board_leds_t leds = { .led1 = 255, .led2 = 255, .led3 = 255 };
-        board_leds_set(leds);
         ESP_LOGI(UI_TAG, "Flashlight ON");
     } else {
-        board_leds_off();
         ESP_LOGI(UI_TAG, "Flashlight OFF");
     }
 }
@@ -346,4 +336,10 @@ void ui_set_brightness(uint8_t level) {
     storage_save_brightness(level);
     
     ESP_LOGI(UI_TAG, "Brightness set to %d%%", level);
+}
+
+/* ================== 系统控制 ================== */
+void ui_system_restart(void) {
+    ESP_LOGI(UI_TAG, "UI requesting system restart");
+    board_system_restart();
 }

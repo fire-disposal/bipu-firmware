@@ -1,5 +1,6 @@
-#include "board.h"
-#include "board_hal.h"
+#include "board_internal.h"  // I2C总线句柄
+#include "board_pins.h"      // I2C配置常量
+#include "board.h"           // 公共接口
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -154,7 +155,7 @@ void board_display_init(void) {
     u8g2_SendBuffer(&s_u8g2);
     
     s_display_initialized = true;
-    ESP_LOGI(BOARD_TAG, "Display initialized");
+    ESP_LOGI(BOARD_TAG, "Display initialized successfully");
 }
 
 /* ================== 显示接口实现 ================== */

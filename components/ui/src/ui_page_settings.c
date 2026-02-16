@@ -15,6 +15,7 @@ typedef enum {
     SETTING_BRIGHTNESS,    // 亮度调节
     SETTING_FLASHLIGHT,    // 手电筒开关
     SETTING_LOCKSCREEN,    // 锁屏立即进入屏保
+    SETTING_RESTART,       // 重启系统
     SETTING_ABOUT,         // 关于设备
     SETTING_BACK,          // 返回
     SETTING_COUNT
@@ -24,6 +25,7 @@ static const char* s_setting_names[] = {
     "屏幕亮度",
     "手电筒",
     "锁屏",
+    "重启",
     "关于",
     "← 返回"
 };
@@ -31,6 +33,11 @@ static const char* s_setting_names[] = {
 static int s_selected_item = 0;
 static bool s_editing = false;  // 是否正在编辑某个设置项
 static bool s_show_about = false;  // 显示关于页面
+
+// 滚动相关参数
+#define ITEMS_PER_PAGE 4  // 每页显示的设置项数量
+#define LINE_HEIGHT 12    // 每行高度
+#define CONTENT_START_Y 24 // 内容起始Y坐标
 
 /* ================== 页面生命周期 ================== */
 static void page_on_enter(void) {
@@ -71,19 +78,20 @@ static void render_settings(void) {
     board_display_rect(0, 12, 128, 1, true);
     ui_draw_text_centered(0, 10, 128, "设置");
     
-    // 设置项列表
-    // 使用与列表页相同的行高与起始 Y，以保证文字与选中背景对齐
-    const int line_height = 12;
-    const int start_y = 24;
+    // 计算当前页码和起始项
+    int page = s_selected_item / ITEMS_PER_PAGE;
+    int start_item = page * ITEMS_PER_PAGE;
+    int end_item = start_item + ITEMS_PER_PAGE;
+    if (end_item > SETTING_COUNT) end_item = SETTING_COUNT;
     
-    for (int i = 0; i < SETTING_COUNT; i++) {
-        int y = start_y + i * line_height;
-        
+    // 显示当前页的选项
+    int y = CONTENT_START_Y;
+    for (int i = start_item; i < end_item; i++) {
         // 选中标记
         if (i == s_selected_item) {
             // 选中行反色：白色背景 + 黑色文字
             board_display_set_draw_color(1);
-            board_display_rect(0, y - line_height + 2, 128, line_height, true);
+            board_display_rect(0, y - LINE_HEIGHT + 2, 128, LINE_HEIGHT, true);
             board_display_set_font_mode(1);
             board_display_set_draw_color(0);
             board_display_text(2, y, "›");
@@ -116,6 +124,7 @@ static void render_settings(void) {
             }
             case SETTING_ABOUT:
             case SETTING_LOCKSCREEN:
+            case SETTING_RESTART:
                 // 无值显示
                 break;
             case SETTING_BACK:
@@ -128,6 +137,8 @@ static void render_settings(void) {
             board_display_set_draw_color(1);
             board_display_set_font_mode(0);
         }
+        
+        y += LINE_HEIGHT;
     }
     
     board_display_end();
@@ -201,6 +212,10 @@ static void on_key(board_key_t key) {
                     case SETTING_LOCKSCREEN:
                         // 立即进入屏保/锁屏
                         ui_enter_standby();
+                        break;
+                    case SETTING_RESTART:
+                        // 执行系统重启
+                        ui_system_restart();
                         break;
                     case SETTING_ABOUT:
                         s_show_about = true;

@@ -1,11 +1,9 @@
-#include "board_hal.h"
+#include "board_pins.h"      // GPIO引脚定义
+#include "board_internal.h"  // I2C总线句柄定义
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
-
-i2c_master_bus_handle_t board_i2c_bus_handle = NULL;
 
 void board_i2c_init(void) {
     i2c_master_bus_config_t i2c_mst_config = {
@@ -19,9 +17,10 @@ void board_i2c_init(void) {
 
     esp_err_t ret = i2c_new_master_bus(&i2c_mst_config, &board_i2c_bus_handle);
     if (ret != ESP_OK) {
-        ESP_LOGE(BOARD_TAG, "i2c_new_master_bus failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(BOARD_TAG, "I2C master bus initialization failed: %s", esp_err_to_name(ret));
+        board_i2c_bus_handle = NULL;
     } else {
-        ESP_LOGI(BOARD_TAG, "I2C master bus initialized (SCL=%d, SDA=%d)",
+        ESP_LOGI(BOARD_TAG, "I2C master bus initialized successfully (SCL=%d, SDA=%d)",
                  BOARD_I2C_SCL_IO, BOARD_I2C_SDA_IO);
     }
 }

@@ -1,14 +1,12 @@
 idf_component_register(
     SRCS
         "ble_manager.c"
-        "src/ble_protocol.c"
-        "src/ble_nus_service.c"
-    INCLUDE_DIRS 
-        "include"
-    REQUIRES 
-        bt 
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        bt
         storage
         esp_timer
-    PRIV_REQUIRES 
+    PRIV_REQUIRES
         nvs_flash
 )

@@ -1,5 +1,4 @@
 #include "board.h"
-#include "board_hal.h"
 #include "app.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -26,7 +25,7 @@ static void app_task(void* pvParameters)
 {
     (void)pvParameters;
     
-    ESP_LOGI(MAIN_TAG, "应用任务已启动 (栈: %u 字节, 优先级: %u, 周期: %ums)",
+    ESP_LOGD(MAIN_TAG, "应用任务已启动 (栈: %u 字节, 优先级: %u, 周期: %ums)",
              APP_TASK_STACK_SIZE, APP_TASK_PRIORITY, APP_TASK_PERIOD_MS);
     
     TickType_t last_wake_time = xTaskGetTickCount();
@@ -52,7 +51,7 @@ static esp_err_t init_nvs(void)
     }
     
     if (ret == ESP_OK) {
-        ESP_LOGI(MAIN_TAG, "NVS 初始化成功");
+        ESP_LOGD(MAIN_TAG, "NVS 初始化成功");
     } else {
         ESP_LOGE(MAIN_TAG, "NVS 初始化失败: %s", esp_err_to_name(ret));
     }
@@ -63,9 +62,7 @@ static esp_err_t init_nvs(void)
 /* ===================== ESP-IDF 主入口 ===================== */
 void app_main(void)
 {
-    ESP_LOGI(MAIN_TAG, "==========================================");
     ESP_LOGI(MAIN_TAG, "启动 BIPI 应用 (FreeRTOS + U8G2 + BLE)");
-    ESP_LOGI(MAIN_TAG, "==========================================");
 
     // 统一启动序列，按阶段初始化并可选重试/降级
     esp_err_t err = ESP_OK;
@@ -92,22 +89,19 @@ void app_main(void)
         esp_restart();
         return;
     }
-    ESP_LOGI(MAIN_TAG, "硬件初始化成功");
+    ESP_LOGD(MAIN_TAG, "硬件初始化成功");
 
     // 步骤3: 应用层初始化（可降级：若 BLE 初始化失败，可继续运行但禁用相关功能）
     err = app_init();
     if (err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "应用初始化遇到问题: %s，继续启动但部分功能可能不可用", esp_err_to_name(err));
     } else {
-        ESP_LOGI(MAIN_TAG, "应用层初始化成功");
+        ESP_LOGD(MAIN_TAG, "应用层初始化成功");
     }
 
-    // 步骤3.1: 系统就绪，短震动一次以提示用户（在蓝牙广播前完成）
-    ESP_LOGI(MAIN_TAG, "系统就绪，执行开机短震动");
-    board_vibrate_on(VIBRATE_STARTUP_MS);
-    // 等待震动结束以保证用户能感知（阻塞短时间，通常 <= 1s）
-    vTaskDelay(pdMS_TO_TICKS(VIBRATE_STARTUP_MS + 50));
-    board_vibrate_off();
+    // 步骤3.1: 系统就绪，开机震动以提示用户（在蓝牙广播前完成）
+    ESP_LOGD(MAIN_TAG, "系统就绪，执行开机短震动");
+    board_vibrate_short();
 
     // 步骤3.2: 启动应用级服务（由 app 组件负责启动 BLE 等）
     esp_err_t srv_ret = app_start_services();
@@ -135,9 +129,7 @@ void app_main(void)
 
     // GUI 任务由 app 组件负责创建
 
-    ESP_LOGI(MAIN_TAG, "==========================================");
     ESP_LOGI(MAIN_TAG, "BIPI 应用启动成功！");
-    ESP_LOGI(MAIN_TAG, "==========================================");
 }
 
 /* GUI task moved into app component (app.c) */

@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 
-# 包含u8g2组件和BLE组件
+# 包含自定义组件目录
 set(EXTRA_COMPONENT_DIRS
-    ${CMAKE_CURRENT_SOURCE_DIR}/components/u8g2
+    ${CMAKE_CURRENT_SOURCE_DIR}/components
 )
 
 # 启用BLE功能
