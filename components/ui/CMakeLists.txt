@@ -16,5 +16,4 @@ idf_component_register(
     PRIV_REQUIRES
         ble
         u8g2
-        app
 )

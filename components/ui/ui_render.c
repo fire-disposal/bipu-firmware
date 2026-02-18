@@ -207,3 +207,16 @@ void ui_render_standby(void) {
 
   board_display_end();
 }
+
+void ui_render_logo(void) {
+    board_display_begin();
+
+    // 使用大号字体显示品牌 LOGO
+    board_display_set_font(u8g2_font_logisoso24_tn);
+    const char *logo = "BIPUPU";
+    int logo_w = board_display_text_width(logo);
+    board_display_text((128 - logo_w) / 2, 36, logo);
+
+    board_display_end();
+}
+

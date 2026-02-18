@@ -2,8 +2,8 @@ idf_component_register(
     SRCS
         "main.c"
     REQUIRES
-        app
         board
-    PRIV_REQUIRES
-        nvs_flash
+        ble
+        ui
+        storage
 )

@@ -1,6 +1,6 @@
 #include "board_internal.h"  // I2C总线句柄
 #include "board_pins.h"      // I2C配置常量
-#include "board.h"           // 公共接口
+#include "board.h"           // 公共接口（包含节能管理）
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -127,6 +127,15 @@ void board_display_init(void) {
         return;
     }
 
+    // 电池供电时等待电源稳定，避免I2C花屏
+    if (!board_power_is_usb_connected()) {
+        ESP_LOGI(BOARD_TAG, "电池供电检测，等待电源稳定...");
+        esp_err_t ret = board_power_wait_stable(2000);
+        if (ret != ESP_OK) {
+            ESP_LOGW(BOARD_TAG, "电源稳定等待异常，继续初始化");
+        }
+    }
+
     // 创建显示互斥锁
     s_display_mutex = xSemaphoreCreateMutex();
     if (s_display_mutex == NULL) {
@@ -146,10 +155,44 @@ void board_display_init(void) {
         return;
     }
 
+    // 电池供电时使用更保守的I2C配置
+    if (!board_power_is_usb_connected()) {
+        ESP_LOGI(BOARD_TAG, "电池供电，使用保守I2C配置");
+        
+        // 使用节能管理推荐的I2C频率
+        uint32_t conservative_freq = board_power_save_get_i2c_freq(BOARD_I2C_FREQ_HZ, false);
+        
+        // 降低I2C频率以提高稳定性
+        i2c_device_config_t dev_cfg_conservative = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+            .device_address = BOARD_OLED_I2C_ADDRESS,
+            .scl_speed_hz = conservative_freq,  // 使用节能推荐的频率
+        };
+        
+        // 重新添加设备以应用保守配置
+        i2c_master_bus_rm_device(display_dev_handle);
+        ret = i2c_master_bus_add_device(board_i2c_bus_handle, &dev_cfg_conservative, &display_dev_handle);
+        if (ret != ESP_OK) {
+            ESP_LOGE(BOARD_TAG, "Failed to add I2C display device with conservative config: %s", esp_err_to_name(ret));
+            return;
+        }
+    }
+
     u8g2_Setup_ssd1309_i2c_128x64_noname0_f(
       &s_u8g2, U8G2_R0, u8g2_esp32_i2c_byte_cb, u8g2_esp32_gpio_delay_cb);
 
+    // 电池供电时增加初始化延迟
+    if (!board_power_is_usb_connected()) {
+        vTaskDelay(pdMS_TO_TICKS(100));  // 额外等待100ms
+    }
+
     u8g2_InitDisplay(&s_u8g2);
+    
+    // 电池供电时逐步唤醒显示，避免电流冲击
+    if (!board_power_is_usb_connected()) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    
     u8g2_SetPowerSave(&s_u8g2, 0);
     u8g2_ClearBuffer(&s_u8g2);
     u8g2_SendBuffer(&s_u8g2);
@@ -224,6 +267,16 @@ void board_display_set_contrast(uint8_t contrast) {
     ESP_LOGW(BOARD_TAG, "Cannot set contrast: display not initialized");
     return;
   }
+  
+  // 应用节能模式的亮度限制
+  bool is_usb = board_power_is_usb_connected();
+  uint8_t max_brightness = board_power_save_get_display_brightness(is_usb);
+  
+  if (contrast > max_brightness) {
+    contrast = max_brightness;
+    ESP_LOGD(BOARD_TAG, "节能模式：亮度限制为 %d%%", max_brightness);
+  }
+  
   // SSD1309 contrast 寄存器范围 0x00-0xFF，但低于 ~0x10 时屏幕几乎不可见
   // 将输入 0-255 映射到 0x10-0xFF 的安全范围
   uint8_t safe_val = (uint8_t)(0x10 + ((uint16_t)contrast * (0xFF - 0x10)) / 255);

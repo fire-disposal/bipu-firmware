@@ -61,6 +61,13 @@ static int nus_chr_access(uint16_t conn_handle, uint16_t attr_handle,
                         free(message);
                     }
                 }
+                
+                // 应用层处理：通知和日志
+                if (len > 1) {
+                    // 使用board层的统一通知接口
+                    board_notify();
+                    ESP_LOGI(TAG, "BLE 消息已接收 - 发送者: BLE, 内容: %.*s", len - 1, &data[1]);
+                }
                 break;
             default:
                 ESP_LOGW(TAG, "Unknown Header: 0x%02X", data[0]);

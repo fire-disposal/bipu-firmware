@@ -5,6 +5,9 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "math.h"
 
 // 定义参数
 #define ADC_UNIT               ADC_UNIT_1
@@ -31,6 +34,13 @@
 // ADC 采样缓存间隔（无论外部调用频率如何，实际采样不超过此频率）
 #define ADC_SAMPLE_INTERVAL_MS       5000U // 5秒采样一次（更频繁检测电压变化）
 
+// 电池管理配置（从 board_battery.c 合并）
+#define BATTERY_UPDATE_INTERVAL_USB_MS    5000U   // USB供电时5秒更新一次
+#define BATTERY_UPDATE_INTERVAL_BATTERY_MS 15000U // 电池供电时15秒更新一次（节省功耗）
+#define BATTERY_LOG_INTERVAL_MS           30000U // 30秒打印一次日志
+#define BATTERY_LOW_VOLTAGE_THRESHOLD     3.0f   // 低电压阈值
+#define BATTERY_CRITICAL_VOLTAGE_THRESHOLD 2.8f  // 严重低电压阈值
+
 // 全局句柄
 static adc_oneshot_unit_handle_t s_adc1_handle = NULL;
 static adc_cali_handle_t s_adc_cali_handle = NULL;
@@ -50,6 +60,12 @@ static uint32_t s_last_voltage_check_time = 0;
 static float s_cached_voltage = 0.0f;
 static uint32_t s_last_adc_sample_time = 0;
 static bool s_voltage_out_of_range = false; // 上次是否处于异常范围（仅状态变化时打日志）
+
+// 电池管理状态（从 board_battery.c 合并）
+static uint32_t s_battery_last_update = 0;
+static uint32_t s_battery_last_log = 0;
+static bool s_low_voltage_mode = false;
+static uint32_t s_battery_current_interval = BATTERY_UPDATE_INTERVAL_USB_MS;
 
 /**
  * @brief ADC 校准初始化
@@ -146,6 +162,56 @@ void board_power_init(void) {
     
     s_power_initialized = true;
     ESP_LOGI(BOARD_TAG, "Power management initialized successfully");
+}
+
+/**
+ * @brief 检测当前供电方式
+ * @return true: USB供电, false: 电池供电
+ */
+bool board_power_is_usb_connected(void) {
+    // 通过电压判断：USB供电时电压通常高于4.5V
+    float voltage = board_battery_voltage();
+    return (voltage > 4.5f);
+}
+
+/**
+ * @brief 等待电源稳定（主要用于电池供电场景）
+ * @param timeout_ms 最大等待时间（毫秒）
+ * @return ESP_OK: 电源稳定, ESP_ERR_TIMEOUT: 等待超时
+ */
+esp_err_t board_power_wait_stable(uint32_t timeout_ms) {
+    uint32_t start_time = board_time_ms();
+    float initial_voltage = board_battery_voltage();
+    
+    ESP_LOGI(BOARD_TAG, "等待电源稳定，初始电压: %.2fV", initial_voltage);
+    
+    // 电池供电时需要更长的稳定时间
+    uint32_t stable_delay = board_power_is_usb_connected() ? 100 : 500;
+    vTaskDelay(pdMS_TO_TICKS(stable_delay));
+    
+    // 检查电压是否稳定
+    for (int i = 0; i < 5; i++) {
+        float current_voltage = board_battery_voltage();
+        float voltage_diff = fabs(current_voltage - initial_voltage);
+        
+        ESP_LOGD(BOARD_TAG, "电压检测 %d: %.2fV (差异: %.3fV)", i + 1, current_voltage, voltage_diff);
+        
+        if (voltage_diff < 0.1f) {
+            ESP_LOGI(BOARD_TAG, "电源已稳定（%.2fV）", current_voltage);
+            return ESP_OK;
+        }
+        
+        if (board_time_ms() - start_time > timeout_ms) {
+            ESP_LOGW(BOARD_TAG, "电源稳定等待超时");
+            return ESP_ERR_TIMEOUT;
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(100));
+        initial_voltage = current_voltage;
+    }
+    
+    ESP_LOGW(BOARD_TAG, "电源未完全稳定，继续运行");
+    return ESP_OK;
 }
 
 float board_battery_voltage(void)
@@ -287,5 +353,114 @@ bool board_battery_is_charging(void)
 void board_system_restart(void)
 {
     ESP_LOGI(BOARD_TAG, "System restart requested by user");
+    
+    // 执行注册的清理回调（由应用层处理）
+    board_execute_cleanup();
+    
+    // 给用户一些反馈 - 短震动提示重启开始
+    board_vibrate_short();
+    
+    // 短暂延迟让用户感知重启动作
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    // 执行系统重启
     esp_restart();
+}
+
+/* ================== 电池管理接口（从 board_battery.c 合并） ================== */
+
+void board_battery_manager_init(void)
+{
+    ESP_LOGI(BOARD_TAG, "电池管理初始化");
+    s_battery_last_update = board_time_ms();
+    s_battery_last_log = s_battery_last_update;
+    s_low_voltage_mode = false;
+    s_battery_current_interval = BATTERY_UPDATE_INTERVAL_USB_MS;
+}
+
+void board_battery_manager_tick(void)
+{
+    uint32_t now = board_time_ms();
+    
+    // 根据供电方式动态调整采样频率
+    bool is_usb = board_power_is_usb_connected();
+    uint32_t target_interval = is_usb ? BATTERY_UPDATE_INTERVAL_USB_MS : BATTERY_UPDATE_INTERVAL_BATTERY_MS;
+    
+    // 如果供电方式改变，更新采样间隔
+    if (target_interval != s_battery_current_interval) {
+        s_battery_current_interval = target_interval;
+        ESP_LOGI(BOARD_TAG, "供电方式改变，电池采样间隔调整为: %lu秒", s_battery_current_interval / 1000);
+    }
+    
+    // 检查是否需要更新
+    if (now - s_battery_last_update < s_battery_current_interval) {
+        return;
+    }
+    s_battery_last_update = now;
+    
+    // 获取电池状态
+    uint8_t battery_level = board_battery_percent();
+    float battery_voltage = board_battery_voltage();
+    bool is_charging = board_battery_is_charging();
+    
+    // 低电压保护
+    if (battery_voltage < BATTERY_CRITICAL_VOLTAGE_THRESHOLD && !is_charging) {
+        // 严重低电压：关闭屏幕或大幅降低亮度
+        board_display_set_contrast(10);  // 最低对比度/亮度
+        s_low_voltage_mode = true;
+        ESP_LOGW(BOARD_TAG, "严重低电压模式：%.2fV", battery_voltage);
+    } else if (battery_voltage < BATTERY_LOW_VOLTAGE_THRESHOLD && !is_charging) {
+        // 低电压：降低亮度
+        if (!s_low_voltage_mode) {
+            board_display_set_contrast(50);  // 中等对比度/亮度
+            s_low_voltage_mode = true;
+            ESP_LOGW(BOARD_TAG, "低电压模式：%.2fV", battery_voltage);
+        }
+    } else {
+        // 电压正常：恢复正常亮度
+        if (s_low_voltage_mode) {
+            board_display_set_contrast(100);  // 恢复默认对比度/亮度
+            s_low_voltage_mode = false;
+            ESP_LOGI(BOARD_TAG, "电压恢复正常：%.2fV", battery_voltage);
+        }
+    }
+    
+    // 定期打印日志（避免过多日志）
+    if (now - s_battery_last_log >= BATTERY_LOG_INTERVAL_MS) {
+        s_battery_last_log = now;
+        ESP_LOGI(BOARD_TAG, "电池: %.2fV, %d%%, %s, %s",
+                 battery_voltage, battery_level,
+                 is_charging ? "充电中" : "未充电",
+                 is_usb ? "USB供电" : "电池供电");
+    }
+}
+
+uint8_t board_battery_manager_get_percent(void)
+{
+    return board_battery_percent();
+}
+
+float board_battery_manager_get_voltage(void)
+{
+    return board_battery_voltage();
+}
+
+bool board_battery_manager_is_charging(void)
+{
+    return board_battery_is_charging();
+}
+
+bool board_battery_manager_is_low_voltage_mode(void)
+{
+    return s_low_voltage_mode;
+}
+
+/**
+ * @brief 获取电池管理的更新间隔（用于节能管理）
+ * @param is_usb_power 当前供电方式
+ * @return 推荐的检测间隔（毫秒）
+ */
+uint32_t board_battery_manager_get_update_interval(bool is_usb_power)
+{
+    return is_usb_power ? BATTERY_UPDATE_INTERVAL_USB_MS : BATTERY_UPDATE_INTERVAL_BATTERY_MS;
 }

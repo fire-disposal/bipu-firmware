@@ -26,6 +26,11 @@ void ui_render_message_read(const ui_message_t* msg, int current_idx, int total_
  */
 void ui_render_standby(void);
 
+/**
+ * @brief 渲染开机 LOGO
+ */
+void ui_render_logo(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -11,27 +11,23 @@
 // I2C总线句柄定义
 i2c_master_bus_handle_t board_i2c_bus_handle = NULL;
 
-/* ================== 板级初始化 ================== */
-esp_err_t board_init(void) {
-  ESP_LOGI(BOARD_TAG, "Initializing board...");
+// 系统清理回调
+static board_cleanup_callback_t s_cleanup_callback = NULL;
 
-  // 各模块初始化
-  // 注意：部分模块可能依赖I2C或其他基础配置，需注意初始化顺序
 
-  // 1. 基础总线初始化
-  board_i2c_init();
+/* ================== 系统清理管理 ================== */
+void board_register_cleanup_callback(board_cleanup_callback_t callback) {
+    s_cleanup_callback = callback;
+    ESP_LOGI(BOARD_TAG, "Cleanup callback registered");
+}
 
-  // 2. 独立外设初始化
-  board_vibrate_init(); // 包含GPIO初始化
-  board_leds_init();    // 包含GPIO初始化（原 RGB）
-  board_key_init();     // 包含GPIO初始化
-  board_power_init();   // 电池ADC初始化
-
-  // 3. 依赖总线的外设初始化
-  board_display_init(); // 依赖I2C
-
-  ESP_LOGI(BOARD_TAG, "Board initialized successfully");
-  return ESP_OK;
+void board_execute_cleanup(void) {
+    if (s_cleanup_callback != NULL) {
+        ESP_LOGI(BOARD_TAG, "Executing cleanup callback");
+        s_cleanup_callback();
+    } else {
+        ESP_LOGW(BOARD_TAG, "No cleanup callback registered");
+    }
 }
 
 /* ================== 通用通知接口 ================== */

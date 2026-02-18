@@ -7,7 +7,6 @@
 extern i2c_master_bus_handle_t board_i2c_bus_handle;
 
 /* ================== 内部初始化函数声明 ================== */
-// 这些函数只在board.c内部使用，不对外暴露
 
 void board_i2c_init(void);
 void board_display_init(void);
