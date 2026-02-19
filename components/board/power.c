@@ -164,55 +164,9 @@ void board_power_init(void) {
     ESP_LOGI(BOARD_TAG, "Power management initialized successfully");
 }
 
-/**
- * @brief 检测当前供电方式
- * @return true: USB供电, false: 电池供电
- */
-bool board_power_is_usb_connected(void) {
-    // 通过电压判断：USB供电时电压通常高于4.5V
-    float voltage = board_battery_voltage();
-    return (voltage > 4.5f);
-}
-
-/**
- * @brief 等待电源稳定（主要用于电池供电场景）
- * @param timeout_ms 最大等待时间（毫秒）
- * @return ESP_OK: 电源稳定, ESP_ERR_TIMEOUT: 等待超时
- */
-esp_err_t board_power_wait_stable(uint32_t timeout_ms) {
-    uint32_t start_time = board_time_ms();
-    float initial_voltage = board_battery_voltage();
-    
-    ESP_LOGI(BOARD_TAG, "等待电源稳定，初始电压: %.2fV", initial_voltage);
-    
-    // 电池供电时需要更长的稳定时间
-    uint32_t stable_delay = board_power_is_usb_connected() ? 100 : 500;
-    vTaskDelay(pdMS_TO_TICKS(stable_delay));
-    
-    // 检查电压是否稳定
-    for (int i = 0; i < 5; i++) {
-        float current_voltage = board_battery_voltage();
-        float voltage_diff = fabs(current_voltage - initial_voltage);
-        
-        ESP_LOGD(BOARD_TAG, "电压检测 %d: %.2fV (差异: %.3fV)", i + 1, current_voltage, voltage_diff);
-        
-        if (voltage_diff < 0.1f) {
-            ESP_LOGI(BOARD_TAG, "电源已稳定（%.2fV）", current_voltage);
-            return ESP_OK;
-        }
-        
-        if (board_time_ms() - start_time > timeout_ms) {
-            ESP_LOGW(BOARD_TAG, "电源稳定等待超时");
-            return ESP_ERR_TIMEOUT;
-        }
-        
-        vTaskDelay(pdMS_TO_TICKS(100));
-        initial_voltage = current_voltage;
-    }
-    
-    ESP_LOGW(BOARD_TAG, "电源未完全稳定，继续运行");
-    return ESP_OK;
-}
+/* Supply-detection and power-wait logic removed.
+   Initialization now proceeds without branching on USB/battery supply.
+*/
 
 float board_battery_voltage(void)
 {
@@ -382,15 +336,7 @@ void board_battery_manager_tick(void)
 {
     uint32_t now = board_time_ms();
     
-    // 根据供电方式动态调整采样频率
-    bool is_usb = board_power_is_usb_connected();
-    uint32_t target_interval = is_usb ? BATTERY_UPDATE_INTERVAL_USB_MS : BATTERY_UPDATE_INTERVAL_BATTERY_MS;
-    
-    // 如果供电方式改变，更新采样间隔
-    if (target_interval != s_battery_current_interval) {
-        s_battery_current_interval = target_interval;
-        ESP_LOGI(BOARD_TAG, "供电方式改变，电池采样间隔调整为: %lu秒", s_battery_current_interval / 1000);
-    }
+    // 使用固定的采样间隔，不再根据供电方式切换
     
     // 检查是否需要更新
     if (now - s_battery_last_update < s_battery_current_interval) {
@@ -428,10 +374,9 @@ void board_battery_manager_tick(void)
     // 定期打印日志（避免过多日志）
     if (now - s_battery_last_log >= BATTERY_LOG_INTERVAL_MS) {
         s_battery_last_log = now;
-        ESP_LOGI(BOARD_TAG, "电池: %.2fV, %d%%, %s, %s",
+        ESP_LOGI(BOARD_TAG, "电池: %.2fV, %d%%, %s",
                  battery_voltage, battery_level,
-                 is_charging ? "充电中" : "未充电",
-                 is_usb ? "USB供电" : "电池供电");
+                 is_charging ? "充电中" : "未充电");
     }
 }
 
@@ -462,5 +407,6 @@ bool board_battery_manager_is_low_voltage_mode(void)
  */
 uint32_t board_battery_manager_get_update_interval(bool is_usb_power)
 {
-    return is_usb_power ? BATTERY_UPDATE_INTERVAL_USB_MS : BATTERY_UPDATE_INTERVAL_BATTERY_MS;
+    (void)is_usb_power;
+    return BATTERY_UPDATE_INTERVAL_USB_MS;
 }

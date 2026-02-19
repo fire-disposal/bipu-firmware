@@ -72,15 +72,17 @@ static void app_task(void *pvParameters) {
 /* ======================== 主入口 ======================== */
 
 void app_main(void) {
-  rtc_cpu_freq_config_t config;
-  rtc_clk_cpu_freq_get_config(&config);
-  rtc_clk_cpu_freq_set_xtal();
-
   // 1. 【视觉优先】—— 剥离非核心初始化
-  board_i2c_init();
+  ESP_LOGI(MAIN_TAG, "Initializing I2C...");
+  if (board_i2c_init() != ESP_OK) {
+    ESP_LOGE(MAIN_TAG, "I2C initialization failed");
+    // 继续启动，后续对 I2C 的调用需自行检查句柄
+  }
   vTaskDelay(pdMS_TO_TICKS(500));
+  ESP_LOGI(MAIN_TAG, "Initializing Display...");
   board_display_init(); 
   vTaskDelay(pdMS_TO_TICKS(500));
+  ESP_LOGI(MAIN_TAG, "Initializing UI...");
   ui_init();
   vTaskDelay(pdMS_TO_TICKS(500));
 
@@ -92,28 +94,27 @@ void app_main(void) {
                           &s_gui_task_handle, 0);
 
   // 2. 【静默初始化其它硬件】—— 屏幕已经亮了，用户不再焦虑，延迟可以给足
+  ESP_LOGI(MAIN_TAG, "Initializing Keys...");
   board_key_init();
   vTaskDelay(pdMS_TO_TICKS(500));
-  board_leds_init();
-  vTaskDelay(pdMS_TO_TICKS(500));
-  // board_vibrate_init();
+  // board_leds_init();
   // vTaskDelay(pdMS_TO_TICKS(500));
+  ESP_LOGI(MAIN_TAG, "Initializing Vibrator...");
+  board_vibrate_init();
+  vTaskDelay(pdMS_TO_TICKS(500));
+  ESP_LOGI(MAIN_TAG, "Initializing Power...");
   board_power_init();
   vTaskDelay(pdMS_TO_TICKS(500));
 
   // 3. 【存储加载】NVS 和文件系统
   // 此时主频默认 160MHz，Flash 读取电流约 30-50mA
+  ESP_LOGI(MAIN_TAG, "Initializing Storage...");
   if (storage_init() != ESP_OK) {
     ESP_LOGW(MAIN_TAG, "Storage init failed, using default config");
   }
   vTaskDelay(pdMS_TO_TICKS(500));
 
-  // 4. 【环境感知】判断供电模式
-  bool is_usb = board_power_is_usb_connected();
-  if (!is_usb) {
-    ESP_LOGW(MAIN_TAG, "Battery Mode: Reducing Log Verbosity");
-    esp_log_level_set("*", ESP_LOG_WARN); // 减少串口输出带来的功耗和时延
-  }
+  // 4. 【环境感知】已移除供电模式分支，保持固定日志级别
 
   // 5. 【逻辑启动】开启应用任务
   xTaskCreatePinnedToCore(app_task, "app_task", 4096, NULL, 5,

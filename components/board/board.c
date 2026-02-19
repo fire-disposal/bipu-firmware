@@ -1,6 +1,5 @@
 #include "board_pins.h"  // 先拿引脚宏
 #include "board.h"       // 再拿函数声明
-#include "board_internal.h"  // 私有初始化函数声明
 
 #include "driver/gpio.h"
 #include "esp_log.h"

@@ -6,6 +6,7 @@
 #include "esp_err.h"
 #include "board_pins.h"
 #include "driver/i2c_master.h"
+#include "freertos/FreeRTOS.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,7 +35,9 @@ void      board_delay_ms(uint32_t ms);
 
 /* ================== 板级初始化函数 ================== */
 
-void board_i2c_init(void);
+esp_err_t board_i2c_init(void);
+// Transmit helper: sends data in chunks with retry, returns esp_err_t
+esp_err_t board_i2c_transmit_chunked(i2c_master_dev_handle_t dev, const uint8_t *data, size_t len, size_t chunk_size, TickType_t timeout);
 void board_display_init(void);
 void board_key_init(void);
 void board_vibrate_init(void);
@@ -87,8 +90,6 @@ uint32_t    board_key_press_duration(board_key_t key); // 获取按下持续时�
 float       board_battery_voltage(void);
 uint8_t     board_battery_percent(void);
 bool        board_battery_is_charging(void);
-bool        board_power_is_usb_connected(void);
-esp_err_t   board_power_wait_stable(uint32_t timeout_ms);
 
 /* ================== 电池管理接口 ================== */
 
@@ -157,73 +158,7 @@ void board_register_cleanup_callback(board_cleanup_callback_t callback);
  */
 void board_execute_cleanup(void);
 
-/* ================== 节能管理接口 ================== */
-
-/**
- * @brief 节能模式配置
- */
-typedef struct {
-    bool enable_low_power_mode;      // 启用低功耗模式
-    uint8_t display_brightness;      // 显示亮度 (10-100%)
-    uint32_t battery_check_interval; // 电池检测间隔 (毫秒)
-    bool reduce_log_output;          // 减少日志输出
-    uint8_t i2c_speed_reduction;     // I2C速度降低因子 (1-5)
-} board_power_save_config_t;
-
-/**
- * @brief 初始化节能管理
- * @param config 节能配置
- * @return ESP_OK 成功，其他值表示错误
- */
-esp_err_t board_power_save_init(const board_power_save_config_t* config);
-
-/**
- * @brief 根据供电方式自动配置节能模式
- * @param is_usb_power true: USB供电，false: 电池供电
- * @return ESP_OK 成功，其他值表示错误
- */
-esp_err_t board_power_save_auto_config(bool is_usb_power);
-
-/**
- * @brief 获取当前节能配置
- * @return 当前节能配置
- */
-board_power_save_config_t board_power_save_get_config(void);
-
-/**
- * @brief 检查是否处于节能模式
- * @return true: 节能模式启用，false: 正常模式
- */
-bool board_power_save_is_enabled(void);
-
-/**
- * @brief 动态调整节能模式
- * @param enable true: 启用节能模式，false: 禁用节能模式
- * @return ESP_OK 成功，其他值表示错误
- */
-esp_err_t board_power_save_set_mode(bool enable);
-
-/**
- * @brief 获取推荐的电池检测间隔
- * @param is_usb_power 当前供电方式
- * @return 推荐的检测间隔（毫秒）
- */
-uint32_t board_power_save_get_battery_interval(bool is_usb_power);
-
-/**
- * @brief 获取推荐的I2C频率
- * @param base_freq_hz 基础频率
- * @param is_usb_power 当前供电方式
- * @return 推荐的I2C频率
- */
-uint32_t board_power_save_get_i2c_freq(uint32_t base_freq_hz, bool is_usb_power);
-
-/**
- * @brief 获取推荐的显示亮度
- * @param is_usb_power 当前供电方式
- * @return 推荐的亮度（10-100%）
- */
-uint8_t board_power_save_get_display_brightness(bool is_usb_power);
+/* 节能管理接口已移除：不再在运行时自动降低 I2C 频率或显示亮度。 */
 
 // 通用通知接口
 void board_notify(void);

@@ -34,7 +34,7 @@
 #endif
 
 // 其他通用常量
-#define BOARD_I2C_FREQ_HZ         400000
+#define BOARD_I2C_FREQ_HZ         100000
 #define BOARD_OLED_I2C_ADDRESS    0x3C
 
 // 应用任务运行核心：双核芯片(S3)跑 Core 1 让出 Core 0 给 BLE，单核芯片(C3)只能跑 Core 0

@@ -1,4 +1,4 @@
-#include "board_internal.h"  // I2C总线句柄
+#include "board.h"  // I2C总线句柄
 #include "board_pins.h"      // I2C配置常量
 #include "board.h"           // 公共接口（包含节能管理）
 #include "freertos/FreeRTOS.h"
@@ -46,21 +46,11 @@ static uint8_t u8g2_esp32_i2c_byte_cb(u8x8_t *u8x8, uint8_t msg,
       if (buf_idx >= sizeof(buffer)) {
         // 触发发送当前缓冲（同步于 I2C 设备句柄）
         if (display_dev_handle != NULL) {
-          // 分段发送已有数据
-          size_t off = 0;
-          while (off < buf_idx) {
-            size_t chunk = (buf_idx - off) > I2C_TX_CHUNK_SIZE ? I2C_TX_CHUNK_SIZE : (buf_idx - off);
-            esp_err_t tret = ESP_FAIL;
-            for (int attempt = 0; attempt < 3; attempt++) {
-              tret = i2c_master_transmit(display_dev_handle, &buffer[off], chunk, pdMS_TO_TICKS(200));
-              if (tret == ESP_OK) break;
-              vTaskDelay(pdMS_TO_TICKS(5));
-            }
-            if (tret != ESP_OK) {
-              ESP_LOGW(BOARD_TAG, "I2C chunk transmit failed during SEND: %d", tret);
-              break;
-            }
-            off += chunk;
+          // 使用总线层的 chunked helper 一次发送整个缓冲
+          esp_err_t tret = board_i2c_transmit_chunked(display_dev_handle, buffer, buf_idx, I2C_TX_CHUNK_SIZE, pdMS_TO_TICKS(200));
+          if (tret != ESP_OK) {
+            ESP_LOGW(BOARD_TAG, "I2C chunk transmit failed during SEND: %s (%d) addr=0x%02x len=%zu",
+                     esp_err_to_name(tret), tret, BOARD_OLED_I2C_ADDRESS, buf_idx);
           }
         }
         buf_idx = 0;
@@ -73,25 +63,15 @@ static uint8_t u8g2_esp32_i2c_byte_cb(u8x8_t *u8x8, uint8_t msg,
   case U8X8_MSG_BYTE_END_TRANSFER: {
     if (display_dev_handle == NULL) return 0;
 
-    // 将缓冲按小块分段发送，避免一次性超过 I2C 传输限制或 u8g2 发包较大导致丢弃
-    size_t off = 0;
-    while (off < buf_idx) {
-      size_t chunk = (buf_idx - off) > I2C_TX_CHUNK_SIZE ? I2C_TX_CHUNK_SIZE : (buf_idx - off);
-      esp_err_t tret = ESP_FAIL;
-      for (int attempt = 0; attempt < 3; attempt++) {
-        tret = i2c_master_transmit(display_dev_handle, &buffer[off], chunk, pdMS_TO_TICKS(200));
-        if (tret == ESP_OK) break;
-        ESP_LOGW(BOARD_TAG, "I2C chunk transmit attempt %d failed: %d", attempt + 1, tret);
-        vTaskDelay(pdMS_TO_TICKS(5));
-      }
-      if (tret != ESP_OK) {
-        ESP_LOGE(BOARD_TAG, "I2C chunk transfer failed: %d (off=%zu chunk=%zu)", tret, off, chunk);
-        // 尝试总线重置一次以恢复
-        i2c_master_bus_reset(board_i2c_bus_handle);
-        vTaskDelay(pdMS_TO_TICKS(100));
-        return 0;
-      }
-      off += chunk;
+    // 使用总线层 helper 发送整个缓冲
+    esp_err_t tret = board_i2c_transmit_chunked(display_dev_handle, buffer, buf_idx, I2C_TX_CHUNK_SIZE, pdMS_TO_TICKS(200));
+    if (tret != ESP_OK) {
+      ESP_LOGE(BOARD_TAG, "I2C chunk transfer failed: %s (%d) addr=0x%02x len=%zu",
+               esp_err_to_name(tret), tret, BOARD_OLED_I2C_ADDRESS, buf_idx);
+      // 尝试总线重置一次以恢复，等待时间从 100ms 缩短到 10ms 减少阻塞
+      i2c_master_bus_reset(board_i2c_bus_handle);
+      vTaskDelay(pdMS_TO_TICKS(10));
+      return 0;
     }
     buf_idx = 0;
     break;
@@ -108,7 +88,13 @@ static uint8_t u8g2_esp32_gpio_delay_cb(u8x8_t *u8x8, uint8_t msg,
                                         uint8_t arg_int, void *arg_ptr) {
   switch (msg) {
   case U8X8_MSG_DELAY_MILLI:
-    vTaskDelay(pdMS_TO_TICKS(arg_int));
+    /* 减少不必要的长阻塞：对于小于系统节拍的毫秒数使用精确微秒延时，
+       否则使用 vTaskDelay 以允许任务切换。 */
+    if (arg_int < portTICK_PERIOD_MS) {
+      ets_delay_us(arg_int * 1000);
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(arg_int));
+    }
     break;
 
   case U8X8_MSG_DELAY_10MICRO:
@@ -127,14 +113,7 @@ void board_display_init(void) {
         return;
     }
 
-    // 电池供电时等待电源稳定，避免I2C花屏
-    if (!board_power_is_usb_connected()) {
-        ESP_LOGI(BOARD_TAG, "电池供电检测，等待电源稳定...");
-        esp_err_t ret = board_power_wait_stable(2000);
-        if (ret != ESP_OK) {
-            ESP_LOGW(BOARD_TAG, "电源稳定等待异常，继续初始化");
-        }
-    }
+    // 不再根据供电方式做特殊等待，恢复简单初始化流程
 
     // 创建显示互斥锁
     s_display_mutex = xSemaphoreCreateMutex();
@@ -151,48 +130,16 @@ void board_display_init(void) {
     
     esp_err_t ret = i2c_master_bus_add_device(board_i2c_bus_handle, &dev_cfg, &display_dev_handle);
     if (ret != ESP_OK) {
-        ESP_LOGE(BOARD_TAG, "Failed to add I2C display device: %s", esp_err_to_name(ret));
-        return;
+      ESP_LOGE(BOARD_TAG, "Failed to add I2C display device: %s", esp_err_to_name(ret));
+      return;
     }
 
-    // 电池供电时使用更保守的I2C配置
-    if (!board_power_is_usb_connected()) {
-        ESP_LOGI(BOARD_TAG, "电池供电，使用保守I2C配置");
-        
-        // 使用节能管理推荐的I2C频率
-        uint32_t conservative_freq = board_power_save_get_i2c_freq(BOARD_I2C_FREQ_HZ, false);
-        
-        // 降低I2C频率以提高稳定性
-        i2c_device_config_t dev_cfg_conservative = {
-            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-            .device_address = BOARD_OLED_I2C_ADDRESS,
-            .scl_speed_hz = conservative_freq,  // 使用节能推荐的频率
-        };
-        
-        // 重新添加设备以应用保守配置
-        i2c_master_bus_rm_device(display_dev_handle);
-        ret = i2c_master_bus_add_device(board_i2c_bus_handle, &dev_cfg_conservative, &display_dev_handle);
-        if (ret != ESP_OK) {
-            ESP_LOGE(BOARD_TAG, "Failed to add I2C display device with conservative config: %s", esp_err_to_name(ret));
-            return;
-        }
-    }
+    // 不再使用节能模块的保守 I2C 重配置；保持默认设备配置
 
     u8g2_Setup_ssd1309_i2c_128x64_noname0_f(
       &s_u8g2, U8G2_R0, u8g2_esp32_i2c_byte_cb, u8g2_esp32_gpio_delay_cb);
 
-    // 电池供电时增加初始化延迟
-    if (!board_power_is_usb_connected()) {
-        vTaskDelay(pdMS_TO_TICKS(100));  // 额外等待100ms
-    }
-
     u8g2_InitDisplay(&s_u8g2);
-    
-    // 电池供电时逐步唤醒显示，避免电流冲击
-    if (!board_power_is_usb_connected()) {
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-    
     u8g2_SetPowerSave(&s_u8g2, 0);
     u8g2_ClearBuffer(&s_u8g2);
     u8g2_SendBuffer(&s_u8g2);
@@ -268,13 +215,11 @@ void board_display_set_contrast(uint8_t contrast) {
     return;
   }
   
-  // 应用节能模式的亮度限制
-  bool is_usb = board_power_is_usb_connected();
-  uint8_t max_brightness = board_power_save_get_display_brightness(is_usb);
-  
+  // 始终允许完整亮度（已移除节能模块限制）
+  uint8_t max_brightness = 100;
+
   if (contrast > max_brightness) {
     contrast = max_brightness;
-    ESP_LOGD(BOARD_TAG, "节能模式：亮度限制为 %d%%", max_brightness);
   }
   
   // SSD1309 contrast 寄存器范围 0x00-0xFF，但低于 ~0x10 时屏幕几乎不可见
