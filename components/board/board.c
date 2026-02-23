@@ -15,19 +15,19 @@ esp_err_t board_init(void) {
   ESP_LOGI(BOARD_TAG, "Initializing board...");
 
   // 各模块初始化
-  // 注意：部分模块可能依赖I2C或其他基础配置，需注意初始化顺序
+  // 注意：部分模块可能依赖 I2C 或其他基础配置，需注意初始化顺序
 
   // 1. 基础总线初始化
   board_i2c_init();
 
   // 2. 独立外设初始化
-  board_vibrate_init(); // 包含GPIO初始化
-  board_leds_init();    // 包含GPIO初始化（原 RGB）
-  board_key_init();     // 包含GPIO初始化
-  board_power_init();   // 电池ADC初始化
+  board_vibrate_init(); // 包含 GPIO 初始化
+  board_leds_init();    // 包含 GPIO 初始化（原 RGB）
+  board_key_init();     // 包含 GPIO 初始化
+  board_power_init();   // 电池 ADC 初始化
 
   // 3. 依赖总线的外设初始化
-  board_display_init(); // 依赖I2C
+  board_display_init(); // 依赖 I2C
 
   ESP_LOGI(BOARD_TAG, "Board initialized successfully");
   return ESP_OK;
@@ -51,15 +51,15 @@ esp_err_t board_set_rtc(uint16_t year, uint8_t month, uint8_t day, uint8_t hour,
 
   // 创建 tm 结构体
   struct tm timeinfo = {0};
-  timeinfo.tm_year = year - 1900; // 年份需要减去1900
-  timeinfo.tm_mon = month - 1;    // 月份需要减去1 (0-11)
+  timeinfo.tm_year = year - 1900; // 年份需要减去 1900
+  timeinfo.tm_mon = month - 1;    // 月份需要减去 1 (0-11)
   timeinfo.tm_mday = day;
   timeinfo.tm_hour = hour;
   timeinfo.tm_min = minute;
   timeinfo.tm_sec = second;
   timeinfo.tm_isdst = -1; // 自动判断夏令时
 
-  // 转换为 time_t (从1970年1月1日起的秒数)
+  // 转换为 time_t (从 1970 年 1 月 1 日起的秒数)
   time_t timestamp = mktime(&timeinfo);
   if (timestamp == -1) {
     ESP_LOGE(BOARD_TAG, "Failed to convert time to timestamp");
@@ -110,9 +110,7 @@ esp_err_t board_set_rtc_from_timestamp(time_t timestamp) {
 
 /* ================== 反馈接口实现 ================== */
 void board_notify(void) {
-  // 震动提醒 (LED 灯由调用者管理，避免覆盖自定义光效)
-  board_vibrate_on(
-      100); // 震动100ms
-            // board_rgb_set(BOARD_COLOR_BLUE); // 已移除，防止覆盖消息光效
+  // 短震动提醒
+  board_vibrate_short();
   ESP_LOGI(BOARD_TAG, "Notification triggered");
 }

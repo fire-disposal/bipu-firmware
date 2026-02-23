@@ -1,10 +1,10 @@
 /**
  * @file ble_protocol.c
  * @brief BLE 协议解析实现
- * 
+ *
  * 支持两种消息格式：
- * 1. 简单 UTF-8 文本: "From Sender: Message" 或纯文本
- * 2. 带效果的二进制协议 (兼容旧版本)
+ * 1. 简单 UTF-8 文本："From Sender: Message"
+ * 2. 二进制协议 (兼容旧版本，仅解析文本内容)
  */
 
 #include "ble_protocol.h"
@@ -50,16 +50,9 @@ bool ble_protocol_parse_text(const char* data, uint16_t len, ble_parsed_msg_t* o
     }
 
     memset(out_msg, 0, sizeof(ble_parsed_msg_t));
-    
+
     // 默认发送者
     strcpy(out_msg->sender, "App");
-    
-    // 默认效果 (来信闪烁)
-    out_msg->effect.r = 255;
-    out_msg->effect.g = 255;
-    out_msg->effect.b = 255;
-    out_msg->effect.duration_ms = 3000;
-    out_msg->vib_mode = 1;
 
     // 尝试解析 "From Sender: Message" 格式
     const char* from_prefix = "From ";
@@ -71,7 +64,7 @@ bool ble_protocol_parse_text(const char* data, uint16_t len, ble_parsed_msg_t* o
             if (sender_len > 0 && sender_len < sizeof(out_msg->sender)) {
                 strncpy(out_msg->sender, data + 5, sender_len);
                 out_msg->sender[sender_len] = '\0';
-                
+
                 // 去除发送者名称末尾空格
                 while (sender_len > 0 && out_msg->sender[sender_len - 1] == ' ') {
                     out_msg->sender[--sender_len] = '\0';
@@ -86,7 +79,7 @@ bool ble_protocol_parse_text(const char* data, uint16_t len, ble_parsed_msg_t* o
                 out_msg->message[msg_len] = '\0';
             }
 
-            ESP_LOGI(TAG, "Parsed text message - Sender: %s, Message: %s", 
+            ESP_LOGI(TAG, "Parsed text message - Sender: %s, Message: %s",
                      out_msg->sender, out_msg->message);
             return true;
         }
@@ -113,12 +106,11 @@ bool ble_protocol_parse(const uint8_t* data, uint16_t len, ble_parsed_msg_t* out
     }
 
     // 检查是否是 UTF-8 文本 (简单启发式判断)
-    // 如果第一个字节是可打印 ASCII 或 UTF-8 多字节序列开头，认为是文本
     if (len > 0) {
         uint8_t first_byte = data[0];
         bool is_text = (first_byte >= 0x20 && first_byte < 0x7F) || // 可打印 ASCII
                        (first_byte >= 0xC0);                         // UTF-8 多字节开头
-        
+
         if (is_text) {
             return ble_protocol_parse_text((const char*)data, len, out_msg);
         }
@@ -149,23 +141,14 @@ bool ble_protocol_parse(const uint8_t* data, uint16_t len, ble_parsed_msg_t* out
 
     size_t offset = 4; // 跳过 Ver, Type, Seq(2)
 
-    // 颜色数据
+    // 跳过颜色数据
     if (offset >= len) return false;
     uint8_t color_count = data[offset++];
-    if (offset + color_count * 3 > len) return false;
+    offset += color_count * 3;  // 跳过 RGB 数据
 
-    if (color_count > 0) {
-        out_msg->effect.r = data[offset];
-        out_msg->effect.g = data[offset + 1];
-        out_msg->effect.b = data[offset + 2];
-        out_msg->effect.duration_ms = 3000;
-    }
-    offset += color_count * 3;
-
-    // 震动数据
+    // 跳过震动数据
     if (offset + 2 > len) return false;
-    out_msg->vib_mode = data[offset++];
-    offset++; // 跳过震动强度
+    offset += 2;  // 跳过震动模式和强度
 
     // 文本数据
     if (offset + 1 > len) return false;
@@ -177,13 +160,6 @@ bool ble_protocol_parse(const uint8_t* data, uint16_t len, ble_parsed_msg_t* out
     size_t copy_len = (text_len > max_text_len) ? max_text_len : text_len;
     memcpy(out_msg->message, &data[offset], copy_len);
     out_msg->message[copy_len] = '\0';
-    out_msg->message[text_len] = '\0';
-    offset += text_len;
-
-    // 屏幕效果
-    if (offset + 1 <= len) {
-        out_msg->screen_effect = data[offset++];
-    }
 
     ESP_LOGI(TAG, "Parsed binary message: %s", out_msg->message);
     return true;
@@ -206,7 +182,7 @@ bool ble_protocol_parse_cts_time(const uint8_t* data, uint16_t len, ble_cts_time
      * Offset 4:   小时 (uint8, 0-23)
      * Offset 5:   分钟 (uint8, 0-59)
      * Offset 6:   秒钟 (uint8, 0-59)
-     * Offset 7:   星期 (uint8, 1=周一...7=周日, 0=未知)
+     * Offset 7:   星期 (uint8, 1=周一...7=周日，0=未知)
      * Offset 8:   毫秒高位 (uint8, 毫秒 * 256 / 1000)
      * Offset 9:   调整原因 (uint8, 通常为 0)
      */
@@ -224,7 +200,7 @@ bool ble_protocol_parse_cts_time(const uint8_t* data, uint16_t len, ble_cts_time
 
     // 验证数据有效性
     bool valid = true;
-    
+
     if (out_time->year < 2000 || out_time->year > 2099) {
         ESP_LOGW(TAG, "CTS year out of range: %d", out_time->year);
         valid = false;
@@ -272,11 +248,11 @@ bool ble_protocol_create_cts_response(const ble_cts_time_t *time_info, uint8_t *
     }
 
     if (*out_len < 10) {
-        ESP_LOGE(TAG, "CTS 响应缓冲区不足: %d (需要10字节)", *out_len);
+        ESP_LOGE(TAG, "CTS 响应缓冲区不足：%d (需要 10 字节)", *out_len);
         return false;
     }
 
-    // 构建 CTS Current Time 格式 (10字节)
+    // 构建 CTS Current Time 格式 (10 字节)
     // Offset 0-1: 年份 (小端字节序)
     out_data[0] = (uint8_t)(time_info->year & 0xFF);
     out_data[1] = (uint8_t)((time_info->year >> 8) & 0xFF);
@@ -303,7 +279,7 @@ bool ble_protocol_create_cts_response(const ble_cts_time_t *time_info, uint8_t *
 
     *out_len = 10;
 
-    ESP_LOGI(TAG, "CTS 响应已创建: %04d-%02d-%02d %02d:%02d:%02d",
+    ESP_LOGI(TAG, "CTS 响应已创建：%04d-%02d-%02d %02d:%02d:%02d",
              time_info->year, time_info->month, time_info->day,
              time_info->hour, time_info->minute, time_info->second);
 

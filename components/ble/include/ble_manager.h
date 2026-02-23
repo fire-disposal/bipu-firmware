@@ -37,10 +37,8 @@ typedef enum {
  * @brief 消息接收回调 (从 NUS TX 特征接收)
  * @param sender 发送者名称
  * @param message 消息内容
- * @param effect 附带效果 (可选)
  */
-typedef void (*ble_message_callback_t)(const char* sender, const char* message, 
-                                        const ble_effect_t* effect);
+typedef void (*ble_message_callback_t)(const char* sender, const char* message);
 
 /**
  * @brief CTS 时间同步回调

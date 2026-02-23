@@ -68,17 +68,33 @@ esp_err_t board_set_rtc_from_timestamp(time_t timestamp);
 
 /* ================== 反馈接口 ================== */
 void board_notify(void);
-    
-/* ================== 震动接口 ================== */
-void board_vibrate_init(void);
-esp_err_t board_vibrate_on(uint32_t ms);
-esp_err_t board_vibrate_off(void);
-void board_vibrate_tick(void);  // 需要在主循环中调用
 
-/* ================== 三个独立白光 LED 接口 ================== */
+/* ================== 震动接口 (状态机) ================== */
+void board_vibrate_init(void);
+void board_vibrate_short(void);           // 短震动
+void board_vibrate_double(void);          // 震动两次
+void board_vibrate_off(void);
+void board_vibrate_tick(void);            // 状态机轮询，需在主循环中调用
+bool board_vibrate_is_active(void);
+
+/* ================== 三个独立白光 LED 接口 (状态机) ================== */
 void board_leds_init(void);
 void board_leds_set(board_leds_t leds);
 void board_leds_off(void);
+board_leds_t board_leds_get_state(void);
+bool board_leds_is_initialized(void);
+// LED 状态机控制
+void board_leds_flashlight_on(void);
+void board_leds_flashlight_off(void);
+bool board_leds_is_flashlight_on(void);
+void board_leds_short_flash(void);        // 短闪一次
+void board_leds_double_flash(void);       // 快速闪动 2 次
+void board_leds_continuous_blink_start(void);
+void board_leds_continuous_blink_stop(void);
+void board_leds_gallop_start(void);
+void board_leds_gallop_stop(void);
+void board_leds_tick(void);               // 状态机轮询，需在主循环中调用
+bool board_leds_is_active(void);          // 是否有活跃效果
 
 /* ================== 电源管理接口 ================== */
 float board_battery_voltage(void);

@@ -4,7 +4,6 @@
 #include "ui_render.h"
 #include "board.h"
 #include "storage.h"
-#include "app_effects.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -52,7 +51,7 @@ typedef struct {
     int current_msg_idx;
     uint32_t last_activity_time;
     bool flashlight_on;      // 手电筒状态
-    uint8_t brightness;      // OLED亮度 (10-100%)
+    uint8_t brightness;      // OLED 亮度 (10-100%)
 } ui_context_t;
 
 static ui_context_t s_ui;
@@ -86,18 +85,18 @@ static void ui_update_activity(void) {
 
 void ui_change_page(ui_state_enum_t new_state) {
     ESP_LOGD(UI_TAG, "Changing page from %d to %d", s_ui.state, new_state);
-    
+
     if (new_state == s_ui.state) {
         ESP_LOGD(UI_TAG, "Page change ignored - same state");
         return;
     }
-    
+
     // Validate transitions: do not enter message-related pages when there are no messages
     if ((new_state == UI_STATE_MESSAGE_LIST || new_state == UI_STATE_MESSAGE_READ) && s_ui.message_count == 0) {
         ESP_LOGW(UI_TAG, "Attempt to enter message page but no messages exist, redirecting to MAIN");
         new_state = UI_STATE_MAIN;
     }
-    
+
     // Ensure current index is within valid range when entering message pages
     if (new_state == UI_STATE_MESSAGE_LIST || new_state == UI_STATE_MESSAGE_READ) {
         if (s_ui.current_msg_idx < 0) s_ui.current_msg_idx = 0;
@@ -106,22 +105,22 @@ void ui_change_page(ui_state_enum_t new_state) {
             s_ui.current_msg_idx = s_ui.message_count - 1;
         }
     }
-    
+
     // 调用旧页面的 exit
     if (s_ui.state != UI_STATE_STANDBY && s_pages[s_ui.state] && s_pages[s_ui.state]->on_exit) {
         ESP_LOGD(UI_TAG, "Calling exit handler for state %d", s_ui.state);
         s_pages[s_ui.state]->on_exit();
     }
-    
+
     ui_state_enum_t old_state = s_ui.state;
     s_ui.state = new_state;
-    
+
     // 调用新页面的 enter
     if (new_state != UI_STATE_STANDBY && s_pages[new_state] && s_pages[new_state]->on_enter) {
         ESP_LOGD(UI_TAG, "Calling enter handler for state %d", new_state);
         s_pages[new_state]->on_enter();
     }
-    
+
     ESP_LOGD(UI_TAG, "Page change completed: %d -> %d", old_state, new_state);
 }
 
@@ -130,13 +129,13 @@ void ui_init(void) {
     memset(&s_ui, 0, sizeof(s_ui));
     s_ui.brightness = DEFAULT_BRIGHTNESS;
     s_ui.flashlight_on = false;
-    
+
     // 创建 UI 互斥锁（保护 UI 状态免受多任务竞态）
     s_ui_mutex = xSemaphoreCreateMutex();
     if (s_ui_mutex == NULL) {
         ESP_LOGE(UI_TAG, "Failed to create UI mutex!");
     }
-    
+
     // initialize NVS storage and load persisted messages
     if (storage_init() == ESP_OK) {
         int loaded_count = 0;
@@ -177,7 +176,7 @@ void ui_tick(void) {
             ui_unlock();
             return;
         }
-        
+
         if (s_pages[s_ui.state] && s_pages[s_ui.state]->tick) {
             s_pages[s_ui.state]->tick();
         }
@@ -203,7 +202,7 @@ void ui_on_key(board_key_t key) {
     if (s_ui.state == UI_STATE_STANDBY) {
         ESP_LOGI(UI_TAG, "Waking up from standby with key %d", key);
         ui_wake_up();
-        // 唤醒后，如果按键是ENTER或DOWN，继续处理
+        // 唤醒后，如果按键是 ENTER 或 DOWN，继续处理
         if (key == BOARD_KEY_ENTER || key == BOARD_KEY_DOWN || key == BOARD_KEY_UP) {
             ESP_LOGI(UI_TAG, "Processing key %d after wake up", key);
             // 显示已初始化，直接处理按键
@@ -238,7 +237,7 @@ void ui_show_message(const char* sender, const char* text) {
         }
         s_ui.message_count = MAX_MESSAGES - 1;
     }
-    
+
     ui_message_t* msg = &s_ui.messages[s_ui.message_count++];
     strncpy(msg->sender, sender, sizeof(msg->sender) - 1);
     msg->sender[sizeof(msg->sender)-1] = '\0';
@@ -247,13 +246,14 @@ void ui_show_message(const char* sender, const char* text) {
     // 使用 wall-clock 时间记录接收时间，以便在消息列表中显示
     msg->timestamp = (uint32_t)time(NULL);
     msg->is_read = false;
-    
+
     ui_wake_up();
     s_ui.current_msg_idx = s_ui.message_count - 1;
     ui_change_page(UI_STATE_MESSAGE_READ);
     board_notify();
-    // 来信提醒LED闪烁
-    app_effects_notify_blink(3000);
+    // 来信提醒 LED 闪烁 + 震动
+    board_leds_double_flash();
+    board_vibrate_double();
     // persist after adding
     storage_save_messages(s_ui.messages, s_ui.message_count, s_ui.current_msg_idx);
 
@@ -266,7 +266,7 @@ void ui_enter_standby(void) {
         ui_change_page(UI_STATE_STANDBY);
         // 渲染待机屏保
         ui_render_standby();
-        // 进入待机时，只有手电筒未开启才关闭LED
+        // 进入待机时，只有手电筒未开启才关闭 LED
         if (!s_ui.flashlight_on) {
             board_leds_off();
         }
@@ -289,24 +289,24 @@ void ui_wake_up(void) {
 /* ================== 消息删除功能 ================== */
 void ui_delete_current_message(void) {
     if (s_ui.message_count <= 0) return;
-    
+
     int idx = s_ui.current_msg_idx;
     if (idx < 0 || idx >= s_ui.message_count) return;
-    
+
     // 移动后面的消息
     for (int i = idx; i < s_ui.message_count - 1; i++) {
         s_ui.messages[i] = s_ui.messages[i + 1];
     }
     s_ui.message_count--;
-    
+
     // 调整当前索引
     if (s_ui.current_msg_idx >= s_ui.message_count && s_ui.message_count > 0) {
         s_ui.current_msg_idx = s_ui.message_count - 1;
     }
-    
+
     // 持久化
     storage_save_messages(s_ui.messages, s_ui.message_count, s_ui.current_msg_idx);
-    
+
     ESP_LOGI(UI_TAG, "Deleted message at idx %d, remaining: %d", idx, s_ui.message_count);
 }
 
@@ -317,9 +317,9 @@ bool ui_is_flashlight_on(void) {
 
 void ui_toggle_flashlight(void) {
     s_ui.flashlight_on = !s_ui.flashlight_on;
-    
+
     if (s_ui.flashlight_on) {
-        // 点亮所有LED作为手电筒
+        // 点亮所有 LED 作为手电筒
         board_leds_t leds = { .led1 = 255, .led2 = 255, .led3 = 255 };
         board_leds_set(leds);
         ESP_LOGI(UI_TAG, "Flashlight ON");
@@ -338,12 +338,12 @@ void ui_set_brightness(uint8_t level) {
     if (level < 10) level = 10;
     if (level > 100) level = 100;
     s_ui.brightness = level;
-    
+
     // 应用亮度到显示器
     board_display_set_contrast((uint8_t)((level * 255) / 100));
-    
+
     // 保存到存储
     storage_save_brightness(level);
-    
+
     ESP_LOGI(UI_TAG, "Brightness set to %d%%", level);
 }

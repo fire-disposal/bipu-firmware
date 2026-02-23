@@ -1,5 +1,4 @@
 #include "app_ble.h"
-#include "app_effects.h"
 #include "board.h"
 #include "ui.h"
 #include "esp_log.h"
@@ -7,18 +6,14 @@
 
 static const char* TAG = "app_ble";
 
-void ble_message_received(const char* sender, const char* message, const ble_effect_t* effect)
+void ble_message_received(const char* sender, const char* message)
 {
     if (!sender || !message) {
         ESP_LOGW(TAG, "BLE 回调接收到无效参数");
         return;
     }
 
-    ESP_LOGI(TAG, "BLE 消息已接收 - 发送者: %s, 内容: %s", sender, message);
-
-    if (effect) {
-        app_effects_apply(effect);
-    }
+    ESP_LOGI(TAG, "BLE 消息已接收 - 发送者：%s, 内容：%s", sender, message);
 
     ui_show_message(sender, message);
 }
@@ -40,6 +35,6 @@ void ble_cts_time_received(const ble_cts_time_t* cts_time)
         ESP_LOGI(TAG, "RTC 已成功更新");
         board_notify();
     } else {
-        ESP_LOGE(TAG, "RTC 更新失败: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "RTC 更新失败：%s", esp_err_to_name(ret));
     }
 }

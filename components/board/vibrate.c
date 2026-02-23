@@ -3,160 +3,209 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "esp_log.h"
+#include <stdint.h>
+#include <stdbool.h>
 
-/* ================== 震动接口实现 ================== */
-// PWM配置参数
-#define VIBRATE_LEDC_TIMER LEDC_TIMER_0
-#define VIBRATE_LEDC_MODE LEDC_LOW_SPEED_MODE
-#define VIBRATE_LEDC_CHANNEL LEDC_CHANNEL_0
-#define VIBRATE_LEDC_RES LEDC_TIMER_10_BIT
-#define VIBRATE_LEDC_FREQ 200  // 降低频率以获得更强的震感
-#define VIBRATE_DUTY_ON (1023) // 100% 占空比
+/* ================== 震动状态机定义 ================== */
 
-// 安全限制
-#define VIBRATE_MAX_DURATION_MS 5000  // 最大震动时间 5秒，防止长时间震动损坏马达
+typedef enum {
+    VIB_SM_IDLE,           // 空闲状态
+    VIB_SM_SHORT,          // 短震动
+    VIB_SM_DOUBLE,         // 震动两次
+} vib_sm_state_t;
 
-static uint32_t s_vibrate_end_time = 0;
-static bool s_vibrate_active = false;
+/* ================== 配置常量 ================== */
+// PWM 配置参数
+#define VIBRATE_LEDC_TIMER      LEDC_TIMER_0
+#define VIBRATE_LEDC_MODE       LEDC_LOW_SPEED_MODE
+#define VIBRATE_LEDC_CHANNEL    LEDC_CHANNEL_0
+#define VIBRATE_LEDC_RES        LEDC_TIMER_10_BIT
+#define VIBRATE_LEDC_FREQ       200     // 降低频率以获得更强的震感
+#define VIBRATE_DUTY_ON         (1023)  // 100% 占空比
+
+// 震动时序配置
+#define VIB_SHORT_ON_MS         150     // 短震动持续时间
+#define VIB_DOUBLE_ON_MS        150     // 双震每次持续时间
+#define VIB_DOUBLE_GAP_MS       100     // 双震间隔
+
+/* ================== 模块状态 ================== */
+static vib_sm_state_t s_sm_state = VIB_SM_IDLE;
+static uint32_t s_sm_start_time = 0;
+static uint32_t s_sm_last_change = 0;
+static int s_sm_sub_state = 0;          // 子状态 (0=第一次亮，1=间隔，2=第二次亮)
 static bool s_vibrate_initialized = false;
 
+/* ================== 内部辅助函数 ================== */
+
+// 设置 PWM 占空比
+static void vibrate_set_pwm(uint32_t duty) {
+    ledc_set_duty(VIBRATE_LEDC_MODE, VIBRATE_LEDC_CHANNEL, duty);
+    ledc_update_duty(VIBRATE_LEDC_MODE, VIBRATE_LEDC_CHANNEL);
+}
+
+// 设置状态机为空闲
+static void sm_set_idle(void) {
+    s_sm_state = VIB_SM_IDLE;
+    s_sm_start_time = 0;
+    s_sm_last_change = 0;
+    s_sm_sub_state = 0;
+    vibrate_set_pwm(0);
+}
+
+/* ================== 公开 API 实现 ================== */
+
 void board_vibrate_init(void) {
-  if (s_vibrate_initialized) {
-    ESP_LOGW(BOARD_TAG, "Vibrate motor already initialized");
-    return;
-  }
+    if (s_vibrate_initialized) {
+        ESP_LOGW(BOARD_TAG, "Vibrate motor already initialized");
+        return;
+    }
 
-  // 配置震动马达GPIO为输出
-  gpio_config_t vibrate_config = {
-      .pin_bit_mask = (1ULL << BOARD_GPIO_VIBRATE),
-      .mode = GPIO_MODE_OUTPUT,
-      .pull_up_en = GPIO_PULLUP_DISABLE,
-      .pull_down_en = GPIO_PULLDOWN_DISABLE,
-      .intr_type = GPIO_INTR_DISABLE,
-  };
-  esp_err_t ret = gpio_config(&vibrate_config);
-  if (ret != ESP_OK) {
-    ESP_LOGE(BOARD_TAG, "Vibrate GPIO config failed: %s", esp_err_to_name(ret));
-    return;
-  }
+    // 配置震动马达 GPIO 为输出
+    gpio_config_t vibrate_config = {
+        .pin_bit_mask = (1ULL << BOARD_GPIO_VIBRATE),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t ret = gpio_config(&vibrate_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(BOARD_TAG, "Vibrate GPIO config failed: %s", esp_err_to_name(ret));
+        return;
+    }
 
-  // LEDC定时器配置
-  ledc_timer_config_t ledc_timer = {.speed_mode = VIBRATE_LEDC_MODE,
-                                    .timer_num = VIBRATE_LEDC_TIMER,
-                                    .duty_resolution = VIBRATE_LEDC_RES,
-                                    .freq_hz = VIBRATE_LEDC_FREQ,
-                                    .clk_cfg = LEDC_AUTO_CLK};
-  ret = ledc_timer_config(&ledc_timer);
-  if (ret != ESP_OK) {
-    ESP_LOGE(BOARD_TAG, "LEDC timer config failed: %s", esp_err_to_name(ret));
-    return;
-  }
+    // LEDC 定时器配置
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode = VIBRATE_LEDC_MODE,
+        .timer_num = VIBRATE_LEDC_TIMER,
+        .duty_resolution = VIBRATE_LEDC_RES,
+        .freq_hz = VIBRATE_LEDC_FREQ,
+        .clk_cfg = LEDC_AUTO_CLK
+    };
+    ret = ledc_timer_config(&ledc_timer);
+    if (ret != ESP_OK) {
+        ESP_LOGE(BOARD_TAG, "LEDC timer config failed: %s", esp_err_to_name(ret));
+        return;
+    }
 
-  // LEDC通道配置
-  ledc_channel_config_t ledc_channel = {.speed_mode = VIBRATE_LEDC_MODE,
-                                        .channel = VIBRATE_LEDC_CHANNEL,
-                                        .timer_sel = VIBRATE_LEDC_TIMER,
-                                        .intr_type = LEDC_INTR_DISABLE,
-                                        .gpio_num = BOARD_GPIO_VIBRATE,
-                                        .duty = 0, // 初始关闭
-                                        .hpoint = 0};
-  ret = ledc_channel_config(&ledc_channel);
-  if (ret != ESP_OK) {
-    ESP_LOGE(BOARD_TAG, "LEDC channel config failed: %s", esp_err_to_name(ret));
-    return;
-  }
+    // LEDC 通道配置
+    ledc_channel_config_t ledc_channel = {
+        .speed_mode = VIBRATE_LEDC_MODE,
+        .channel = VIBRATE_LEDC_CHANNEL,
+        .timer_sel = VIBRATE_LEDC_TIMER,
+        .intr_type = LEDC_INTR_DISABLE,
+        .gpio_num = BOARD_GPIO_VIBRATE,
+        .duty = 0,
+        .hpoint = 0
+    };
+    ret = ledc_channel_config(&ledc_channel);
+    if (ret != ESP_OK) {
+        ESP_LOGE(BOARD_TAG, "LEDC channel config failed: %s", esp_err_to_name(ret));
+        return;
+    }
 
-  // 增强GPIO驱动强度到最大 (LEDC配置后再次确保驱动能力)
-  // 注意：如果直接驱动马达，GPIO电流可能不足，建议使用晶体管驱动
-  gpio_set_drive_capability(BOARD_GPIO_VIBRATE, GPIO_DRIVE_CAP_3);
+    // 增强 GPIO 驱动强度
+    gpio_set_drive_capability(BOARD_GPIO_VIBRATE, GPIO_DRIVE_CAP_3);
 
-  s_vibrate_active = false;
-  s_vibrate_end_time = 0;
-  s_vibrate_initialized = true;
-  
-  ESP_LOGI(BOARD_TAG, "Vibrate motor initialized (PWM %dHz) on GPIO%d",
-           VIBRATE_LEDC_FREQ, BOARD_GPIO_VIBRATE);
+    s_vibrate_initialized = true;
+    sm_set_idle();
+    
+    ESP_LOGI(BOARD_TAG, "Vibrate motor initialized (PWM %dHz) on GPIO%d",
+             VIBRATE_LEDC_FREQ, BOARD_GPIO_VIBRATE);
 }
 
-esp_err_t board_vibrate_on(uint32_t ms) {
-  if (!s_vibrate_initialized) {
-    ESP_LOGW(BOARD_TAG, "Vibrate motor not initialized");
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  // 安全限制：限制最大震动时间
-  if (ms > VIBRATE_MAX_DURATION_MS) {
-    ESP_LOGW(BOARD_TAG, "Vibrate duration capped from %lu to %d ms", ms, VIBRATE_MAX_DURATION_MS);
-    ms = VIBRATE_MAX_DURATION_MS;
-  }
-
-  // 设置占空比开启震动
-  esp_err_t ret = ledc_set_duty(VIBRATE_LEDC_MODE, VIBRATE_LEDC_CHANNEL, VIBRATE_DUTY_ON);
-  if (ret != ESP_OK) {
-    ESP_LOGE(BOARD_TAG, "Failed to set vibrate duty: %s", esp_err_to_name(ret));
-    return ret;
-  }
-  
-  ret = ledc_update_duty(VIBRATE_LEDC_MODE, VIBRATE_LEDC_CHANNEL);
-  if (ret != ESP_OK) {
-    ESP_LOGE(BOARD_TAG, "Failed to update vibrate duty: %s", esp_err_to_name(ret));
-    return ret;
-  }
-
-  // 先设置end_time再激活标志，确保原子性
-  if (ms > 0) {
-    s_vibrate_end_time = board_time_ms() + ms;
-    s_vibrate_active = true;
-  } else {
-    // 持续震动：使用最大安全时间而不是无限
-    s_vibrate_end_time = board_time_ms() + VIBRATE_MAX_DURATION_MS;
-    s_vibrate_active = true;
-    ESP_LOGW(BOARD_TAG, "Continuous vibrate requested, using max duration %d ms", VIBRATE_MAX_DURATION_MS);
-  }
-  ESP_LOGD(BOARD_TAG, "Vibrate ON: %lu ms", ms);
-  return ESP_OK;
+void board_vibrate_short(void) {
+    if (!s_vibrate_initialized) return;
+    
+    // 如果已经在震动中，不中断（简单优先级）
+    if (s_sm_state != VIB_SM_IDLE) return;
+    
+    s_sm_state = VIB_SM_SHORT;
+    s_sm_start_time = board_time_ms();
+    s_sm_last_change = board_time_ms();
+    s_sm_sub_state = 0;  // 0=震动
+    vibrate_set_pwm(VIBRATE_DUTY_ON);
+    
+    ESP_LOGD(BOARD_TAG, "Short vibrate started");
 }
 
-esp_err_t board_vibrate_off(void) {
-  if (!s_vibrate_initialized) {
-    return ESP_OK; // 静默返回
-  }
-
-  s_vibrate_active = false;
-  s_vibrate_end_time = 0;
-
-  // 设置占空比为0关闭震动
-  esp_err_t ret = ledc_set_duty(VIBRATE_LEDC_MODE, VIBRATE_LEDC_CHANNEL, 0);
-  if (ret != ESP_OK) {
-    ESP_LOGE(BOARD_TAG, "Failed to stop vibrate: %s", esp_err_to_name(ret));
-    return ret;
-  }
-  
-  ret = ledc_update_duty(VIBRATE_LEDC_MODE, VIBRATE_LEDC_CHANNEL);
-  if (ret != ESP_OK) {
-    ESP_LOGE(BOARD_TAG, "Failed to update vibrate off: %s", esp_err_to_name(ret));
-    return ret;
-  }
-
-  ESP_LOGD(BOARD_TAG, "Vibrate OFF");
-  return ESP_OK;
+void board_vibrate_double(void) {
+    if (!s_vibrate_initialized) return;
+    
+    // 如果已经在震动中，不中断
+    if (s_sm_state != VIB_SM_IDLE) return;
+    
+    s_sm_state = VIB_SM_DOUBLE;
+    s_sm_start_time = board_time_ms();
+    s_sm_last_change = board_time_ms();
+    s_sm_sub_state = 0;  // 0=第一次震动
+    vibrate_set_pwm(VIBRATE_DUTY_ON);
+    
+    ESP_LOGD(BOARD_TAG, "Double vibrate started");
 }
 
-/* ================== 震动状态管理 ================== */
+void board_vibrate_off(void) {
+    if (!s_vibrate_initialized) return;
+    
+    sm_set_idle();
+    ESP_LOGD(BOARD_TAG, "Vibrate forced OFF");
+}
+
+/* ================== 震动状态机轮询 ================== */
 void board_vibrate_tick(void) {
-  if (!s_vibrate_initialized || !s_vibrate_active) {
-    return; // 未初始化或未激活，直接返回
-  }
+    if (!s_vibrate_initialized || s_sm_state == VIB_SM_IDLE) {
+        return;
+    }
 
-  uint32_t current_time = board_time_ms();
-  
-  // 检查是否超时
-  if (current_time >= s_vibrate_end_time) {
-    board_vibrate_off();
-  }
+    uint32_t now = board_time_ms();
+
+    switch (s_sm_state) {
+        case VIB_SM_SHORT: {
+            // 短震动：震动 150ms -> 停止
+            if (now - s_sm_last_change >= VIB_SHORT_ON_MS) {
+                sm_set_idle();
+                ESP_LOGD(BOARD_TAG, "Short vibrate completed");
+            }
+            break;
+        }
+
+        case VIB_SM_DOUBLE: {
+            // 震动两次：震 150ms -> 停 100ms -> 震 150ms -> 停
+            if (s_sm_sub_state == 0) {
+                // 第一次震动
+                if (now - s_sm_last_change >= VIB_DOUBLE_ON_MS) {
+                    s_sm_sub_state = 1;
+                    s_sm_last_change = now;
+                    vibrate_set_pwm(0);  // 停止（间隔）
+                }
+            } else if (s_sm_sub_state == 1) {
+                // 间隔
+                if (now - s_sm_last_change >= VIB_DOUBLE_GAP_MS) {
+                    s_sm_sub_state = 2;
+                    s_sm_last_change = now;
+                    vibrate_set_pwm(VIBRATE_DUTY_ON);  // 第二次震动
+                }
+            } else {
+                // 第二次震动
+                if (now - s_sm_last_change >= VIB_DOUBLE_ON_MS) {
+                    sm_set_idle();
+                    ESP_LOGD(BOARD_TAG, "Double vibrate completed");
+                }
+            }
+            break;
+        }
+
+        default:
+            sm_set_idle();
+            break;
+    }
 }
 
-/* 检查震动是否正在进行 */
+/* ================== 状态查询 ================== */
 bool board_vibrate_is_active(void) {
-    return s_vibrate_initialized && s_vibrate_active;
+    return s_vibrate_initialized && s_sm_state != VIB_SM_IDLE;
+}
+
+bool board_vibrate_is_initialized(void) {
+    return s_vibrate_initialized;
 }

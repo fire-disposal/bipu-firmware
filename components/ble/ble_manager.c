@@ -80,7 +80,7 @@ static void nus_message_handler(const char* message, uint16_t len)
         if (len <= 1) return;
         ble_parsed_msg_t parsed;
         if (ble_protocol_parse_text((const char*)(data + 1), (uint16_t)(len - 1), &parsed)) {
-            if (s_message_callback) s_message_callback(parsed.sender, parsed.message, &parsed.effect);
+            if (s_message_callback) s_message_callback(parsed.sender, parsed.message);
         }
         return;
     }
@@ -88,7 +88,7 @@ static void nus_message_handler(const char* message, uint16_t len)
     // 普通文本或旧二进制协议
     ble_parsed_msg_t parsed;
     if (ble_protocol_parse((const uint8_t*)data, len, &parsed)) {
-        if (s_message_callback) s_message_callback(parsed.sender, parsed.message, &parsed.effect);
+        if (s_message_callback) s_message_callback(parsed.sender, parsed.message);
     }
 }
 
