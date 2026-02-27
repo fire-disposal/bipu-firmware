@@ -67,7 +67,8 @@ esp_err_t app_init(void)
 
         // 设置回调
         ble_manager_set_message_callback(ble_message_received);
-        ble_manager_set_cts_time_callback(ble_cts_time_received);
+        ble_manager_set_time_sync_callback(ble_time_sync_received);
+        ble_manager_set_connection_callback(ble_connection_changed);
 
         // BLE 广播延后启动：由系统入口在所有初始化完成后触发
     }

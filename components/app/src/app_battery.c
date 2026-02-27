@@ -1,6 +1,5 @@
 #include "app_battery.h"
 #include "board.h"
-#include "ble_manager.h"
 #include "ui.h"
 #include "esp_log.h"
 #include <stdint.h>

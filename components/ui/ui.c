@@ -226,8 +226,13 @@ void ui_on_key(board_key_t key) {
 }
 
 void ui_show_message(const char* sender, const char* text) {
+    // 调用带时间戳的版本，使用当前时间
+    ui_show_message_with_timestamp(sender, text, (uint32_t)time(NULL));
+}
+
+void ui_show_message_with_timestamp(const char* sender, const char* text, uint32_t timestamp) {
     if (!ui_lock()) {
-        ESP_LOGW(UI_TAG, "ui_show_message: failed to acquire lock, message dropped");
+        ESP_LOGW(UI_TAG, "ui_show_message_with_timestamp: failed to acquire lock, message dropped");
         return;
     }
 
@@ -243,9 +248,11 @@ void ui_show_message(const char* sender, const char* text) {
     msg->sender[sizeof(msg->sender)-1] = '\0';
     strncpy(msg->text, text, sizeof(msg->text) - 1);
     msg->text[sizeof(msg->text)-1] = '\0';
-    // 使用 wall-clock 时间记录接收时间，以便在消息列表中显示
-    msg->timestamp = (uint32_t)time(NULL);
+    // 使用传入的时间戳
+    msg->timestamp = timestamp;
     msg->is_read = false;
+
+    ESP_LOGI(UI_TAG, "显示消息 - 发送者: %s, 时间戳: %u", sender, timestamp);
 
     ui_wake_up();
     s_ui.current_msg_idx = s_ui.message_count - 1;

@@ -19,6 +19,9 @@ esp_err_t board_init(void) {
 
   // 1. 基础总线初始化
   board_i2c_init();
+  
+  // 添加500ms延时，确保I2C总线稳定
+  vTaskDelay(pdMS_TO_TICKS(500));
 
   // 2. 独立外设初始化
   board_vibrate_init(); // 包含 GPIO 初始化
@@ -28,6 +31,9 @@ esp_err_t board_init(void) {
 
   // 3. 依赖总线的外设初始化
   board_display_init(); // 依赖 I2C
+  
+  // 添加500ms延时，确保显示屏初始化完成
+  vTaskDelay(pdMS_TO_TICKS(500));
 
   ESP_LOGI(BOARD_TAG, "Board initialized successfully");
   return ESP_OK;
