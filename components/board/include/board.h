@@ -75,11 +75,56 @@ typedef enum {
     BOARD_LED_MODE_NOTIFY_FLASH,     // 通知闪烁（快速闪两次）
 } board_led_mode_t;
 
+/* ================== RTC (实时时钟) 接口 ================== */
+/**
+ * @brief 设置系统时间 (RTC)
+ * @param year 年份 (2000-2099)
+ * @param month 月份 (1-12)
+ * @param day 日期 (1-31)
+ * @param hour 小时 (0-23)
+ * @param minute 分钟 (0-59)
+ * @param second 秒钟 (0-59)
+ * @return ESP_OK 成功，其他值表示错误
+ */
+esp_err_t board_set_rtc(uint16_t year, uint8_t month, uint8_t day, 
+                        uint8_t hour, uint8_t minute, uint8_t second);
+
+/**
+ * @brief 从 time_t 时间戳设置 RTC
+ * @param timestamp 时间戳 (从1970年1月1日起的秒数)
+ * @return ESP_OK 成功，其他值表示错误
+ */
+esp_err_t board_set_rtc_from_timestamp(time_t timestamp);
+
+/* ================== 反馈接口 ================== */
+void board_notify(void);
+
+/* ================== 震动接口 (状态机) ================== */
+void board_vibrate_init(void);
+void board_vibrate_short(void);           // 短震动
+void board_vibrate_double(void);          // 震动两次
+void board_vibrate_off(void);
+void board_vibrate_tick(void);            // 状态机轮询，需在主循环中调用
+bool board_vibrate_is_active(void);
+
+/* ================== 三个独立白光 LED 接口 (状态机) ================== */
+void board_leds_init(void);
 void board_leds_set(board_leds_t leds);
 void board_leds_off(void);
-void board_leds_tick(void);  // 周期调用以更新 LED 状态（需在主循环中调用）
-void board_leds_set_mode(board_led_mode_t mode);  // 设置 LED 工作模式
-void board_leds_notify(void);  // LED 通知闪烁（快速闪两次，优先级最高）
+board_leds_t board_leds_get_state(void);
+bool board_leds_is_initialized(void);
+// LED 状态机控制
+void board_leds_flashlight_on(void);
+void board_leds_flashlight_off(void);
+bool board_leds_is_flashlight_on(void);
+void board_leds_short_flash(void);        // 短闪一次
+void board_leds_double_flash(void);       // 快速闪动 2 次
+void board_leds_continuous_blink_start(void);
+void board_leds_continuous_blink_stop(void);
+void board_leds_gallop_start(void);
+void board_leds_gallop_stop(void);
+void board_leds_tick(void);               // 状态机轮询，需在主循环中调用
+bool board_leds_is_active(void);          // 是否有活跃效果
 
 /* ================== 输入与传感器 ================== */
 

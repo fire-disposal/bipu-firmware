@@ -14,59 +14,49 @@ static const char *MAIN_TAG = "MAIN_BOOT";
 
 /* ======================== 任务配置 ======================== */
 
-#define APP_TASK_STACK_SIZE (4096)
-#define APP_TASK_PRIORITY (5)
-#define APP_TASK_PERIOD_MS (20) // 50Hz 平滑硬件驱动
-#define APP_TASK_NAME "app_task"
-#define GUI_TASK_STACK_SIZE (4096)
-#define GUI_TASK_PRIORITY (3)   // 优先级略低于逻辑任务
-#define GUI_TASK_PERIOD_MS (40) // 25FPS
-#define GUI_TASK_NAME "gui_task"
-
 #define STARTUP_RESTART_DELAY_MS (2000)
 
 /* ======================== 任务句柄 ======================== */
 static TaskHandle_t s_gui_task_handle = NULL;
 static TaskHandle_t s_app_task_handle = NULL;
 
-/* ======================== 任务实现 ======================== */
+/* ===================== 应用主任务 ===================== */
+static void app_task(void* pvParameters)
+{
+    (void)pvParameters;
 
-// GUI 渲染任务：负责屏幕刷新
-static void gui_task(void *pvParameters) {
-  TickType_t xLastWakeTime = xTaskGetTickCount();
-  for (;;) {
-    ui_tick();
-    vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(40)); // 25FPS
-  }
+    ESP_LOGI(MAIN_TAG, "应用任务已启动 (栈：%u 字节，优先级：%u, 周期：%ums)",
+             APP_TASK_STACK_SIZE, APP_TASK_PRIORITY, APP_TASK_PERIOD_MS);
+
+    TickType_t last_wake_time = xTaskGetTickCount();
+
+    while (1) {
+        // 执行应用主循环（非阻塞）
+        app_loop();
+
+        // 使用 vTaskDelayUntil 保证周期执行
+        vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(APP_TASK_PERIOD_MS));
+    }
 }
 
-// APP 逻辑任务：负责按键、LED、电量同步
-static void app_task(void *pvParameters) {
-  TickType_t xLastWakeTime = xTaskGetTickCount();
-  uint32_t cnt = 0;
-  for (;;) {
-    board_key_t key = board_key_poll();
-    if (key != BOARD_KEY_NONE)
-      ui_on_key(key);
+/* ===================== NVS 初始化 ===================== */
+static esp_err_t init_nvs(void)
+{
+    esp_err_t ret = nvs_flash_init();
 
-    board_vibrate_tick();
-    board_leds_tick();
-
-    // 每 200ms 执行一次低频同步（电量、LED模式）
-    if (++cnt >= 10) {
-      cnt = 0;
-      // 状态同步逻辑
-      ble_state_t ble_st = ble_manager_get_state();
-      if (ui_is_flashlight_on())
-        board_leds_set_mode(BOARD_LED_MODE_STATIC);
-      else
-        board_leds_set_mode(ble_st == BLE_STATE_CONNECTED ? BOARD_LED_MODE_BLINK
-                                                          : BOARD_LED_MODE_OFF);
-
-      board_battery_manager_tick();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(MAIN_TAG, "NVS 分区已满或版本不兼容，清除并重新初始化");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
     }
-    vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(20));
-  }
+
+    if (ret == ESP_OK) {
+        ESP_LOGI(MAIN_TAG, "NVS 初始化成功");
+    } else {
+        ESP_LOGE(MAIN_TAG, "NVS 初始化失败：%s", esp_err_to_name(ret));
+    }
+
+    return ret;
 }
 
 /* ======================== 主入口 ======================== */
@@ -86,39 +76,60 @@ void app_main(void) {
   ui_init();
   vTaskDelay(pdMS_TO_TICKS(500));
 
-  // 在 GUI 任务启动前显示开机 LOGO（显示已初始化且未并发访问）
-  ui_render_logo();
-  vTaskDelay(pdMS_TO_TICKS(800));
+    // 步骤 1: NVS
+    err = init_nvs();
+    if (err != ESP_OK) {
+        ESP_LOGE(MAIN_TAG, "NVS 初始化失败：%s", esp_err_to_name(err));
+        vTaskDelay(pdMS_TO_TICKS(STARTUP_RESTART_DELAY_MS));
+        esp_restart();
+        return;
+    }
 
-  xTaskCreatePinnedToCore(gui_task, "gui_task", 4096, NULL, 3,
-                          &s_gui_task_handle, 0);
+    // 步骤 2: 硬件初始化（board_init），尝试一次，如果失败则重试一次
+    err = board_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "board_init 失败：%s，重试一次...", esp_err_to_name(err));
+        vTaskDelay(pdMS_TO_TICKS(200));
+        err = board_init();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(MAIN_TAG, "硬件初始化失败：%s，程序将在 2 秒后重启", esp_err_to_name(err));
+        vTaskDelay(pdMS_TO_TICKS(STARTUP_RESTART_DELAY_MS));
+        esp_restart();
+        return;
+    }
+    ESP_LOGI(MAIN_TAG, "硬件初始化成功");
 
-  // 2. 【静默初始化其它硬件】—— 屏幕已经亮了，用户不再焦虑，延迟可以给足
-  ESP_LOGI(MAIN_TAG, "Initializing Keys...");
-  board_key_init();
-  vTaskDelay(pdMS_TO_TICKS(500));
-  // board_leds_init();
-  // vTaskDelay(pdMS_TO_TICKS(500));
-  ESP_LOGI(MAIN_TAG, "Initializing Vibrator...");
-  board_vibrate_init();
-  vTaskDelay(pdMS_TO_TICKS(500));
-  ESP_LOGI(MAIN_TAG, "Initializing Power...");
-  board_power_init();
-  vTaskDelay(pdMS_TO_TICKS(500));
+    // 步骤 3: 应用层初始化（可降级：若 BLE 初始化失败，可继续运行但禁用相关功能）
+    err = app_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "应用初始化遇到问题：%s，继续启动但部分功能可能不可用", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(MAIN_TAG, "应用层初始化成功");
+    }
 
-  // 3. 【存储加载】NVS 和文件系统
-  // 此时主频默认 160MHz，Flash 读取电流约 30-50mA
-  ESP_LOGI(MAIN_TAG, "Initializing Storage...");
-  if (storage_init() != ESP_OK) {
-    ESP_LOGW(MAIN_TAG, "Storage init failed, using default config");
-  }
-  vTaskDelay(pdMS_TO_TICKS(500));
+    // 步骤 3.1: 系统就绪，短震动一次以提示用户（在蓝牙广播前完成）
+    ESP_LOGI(MAIN_TAG, "系统就绪，执行开机短震动");
+    board_vibrate_short();
+    // 等待震动结束以保证用户能感知（阻塞短时间，通常 <= 1s）
+    vTaskDelay(pdMS_TO_TICKS(200));
 
-  // 4. 【环境感知】已移除供电模式分支，保持固定日志级别
+    // 步骤 3.2: 启动应用级服务（由 app 组件负责启动 BLE 等）
+    esp_err_t srv_ret = app_start_services();
+    if (srv_ret != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "app_start_services returned %s", esp_err_to_name(srv_ret));
+    }
 
-  // 5. 【逻辑启动】开启应用任务
-  xTaskCreatePinnedToCore(app_task, "app_task", 4096, NULL, 5,
-                          &s_app_task_handle, 0);
+    // 步骤 4: 创建应用主任务（双核芯片绑 Core 1 避让 BLE，单核芯片绑 Core 0）
+    BaseType_t xReturned = xTaskCreatePinnedToCore(
+        app_task,
+        APP_TASK_NAME,
+        APP_TASK_STACK_SIZE,
+        NULL,
+        APP_TASK_PRIORITY,
+        NULL,
+        BOARD_APP_CPU
+    );
 
   // 6. 【电源稳压】在启动蓝牙大魔王前，给系统一个缓冲期
   // 此时屏幕和逻辑任务已稳定运行，电流平稳
@@ -130,17 +141,4 @@ void app_main(void) {
 
   vTaskDelay(pdMS_TO_TICKS(500));
 
-  ESP_LOGI(MAIN_TAG, "Attempting BLE Radio Launch...");
-  // 重点：这是 BOD 重启的最可能触发点
-  if (ble_manager_init() == ESP_OK) {
-    ble_manager_start_advertising();
-    ESP_LOGI(MAIN_TAG, "BLE Stack Online");
-  } else {
-    // 如果蓝牙炸了，至少 UI 和其他功能还能用（降级模式）
-    ESP_LOGE(MAIN_TAG, "BLE Radio Failed to start");
-  }
-
-  // 8. 【清理退出】
-  ESP_LOGI(MAIN_TAG, "Boot Sequence Complete.");
-  vTaskDelete(NULL);
-}
+/* GUI task moved into app component (app.c) */

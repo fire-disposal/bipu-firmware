@@ -36,6 +36,7 @@ ui_message_t* ui_get_message_at(int idx);
 
 /* ================== 业务接口 ================== */
 void ui_show_message(const char* sender, const char* text);
+void ui_show_message_with_timestamp(const char* sender, const char* text, uint32_t timestamp);
 void ui_delete_current_message(void);
 void ui_enter_standby(void);
 void ui_wake_up(void);
