@@ -15,6 +15,7 @@ extern "C" {
 
 // --- BLE 状态枚举 ---
 typedef enum {
+    BLE_STATE_UNINITIALIZED,
     BLE_STATE_IDLE,
     BLE_STATE_ADVERTISING,
     BLE_STATE_CONNECTED,
@@ -23,6 +24,8 @@ typedef enum {
 
 // --- 消息回调函数类型 ---
 typedef void (*ble_message_callback_t)(const char* sender, const char* message);
+typedef void (*ble_time_sync_callback_t)(uint32_t timestamp);
+typedef void (*ble_connection_callback_t)(bool connected);
 
 // --- 外部接口 ---
 
@@ -67,6 +70,20 @@ void ble_manager_start(void);
  * 用于你的"本地按键解绑"逻辑
  */
 void ble_manager_force_reset_bonds(void);
+
+/**
+ * @brief 发送绑定信息到设备
+ * @param app_id 应用ID
+ * @param user_name 用户名
+ * @return ESP_OK 成功，其他值表示错误
+ */
+esp_err_t ble_manager_send_binding_info(const char* app_id, const char* user_name);
+
+/**
+ * @brief 发送解绑确认到设备
+ * @return ESP_OK 成功，其他值表示错误
+ */
+esp_err_t ble_manager_send_unbind_confirm(void);
 
 /**
  * @brief 全局连接状态标识

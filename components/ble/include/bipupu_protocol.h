@@ -43,7 +43,9 @@ extern "C" {
 typedef enum {
     BIPUPU_MSG_TIME_SYNC = 0x01,      /**< 时间同步消息 */
     BIPUPU_MSG_TEXT = 0x02,           /**< 文本消息 */
-    BIPUPU_MSG_ACKNOWLEDGEMENT = 0x03 /**< 确认响应 (预留) */
+    BIPUPU_MSG_ACKNOWLEDGEMENT = 0x03, /**< 确认响应 (预留) */
+    BIPUPU_MSG_BINDING_INFO = 0x04,   /**< 绑定信息交换 */
+    BIPUPU_MSG_UNBIND_COMMAND = 0x05  /**< 解绑命令 */
 } bipupu_message_type_t;
 
 /* ================== 解析结果结构 ================== */
@@ -112,6 +114,29 @@ size_t bipupu_protocol_create_time_sync(uint32_t timestamp, uint8_t* buffer, siz
  */
 size_t bipupu_protocol_create_text_message(uint32_t timestamp, const char* text, size_t text_length, 
                                           uint8_t* buffer, size_t buffer_size);
+
+/**
+ * @brief 创建绑定信息数据包
+ * 
+ * @param timestamp Unix时间戳 (秒)
+ * @param binding_info JSON格式的绑定信息
+ * @param info_length 绑定信息长度 (字节数)
+ * @param buffer 输出缓冲区
+ * @param buffer_size 缓冲区大小
+ * @return size_t 实际写入的字节数，0表示失败
+ */
+size_t bipupu_protocol_create_binding_info(uint32_t timestamp, const char* binding_info, size_t info_length,
+                                          uint8_t* buffer, size_t buffer_size);
+
+/**
+ * @brief 创建解绑确认数据包
+ * 
+ * @param timestamp Unix时间戳 (秒)
+ * @param buffer 输出缓冲区
+ * @param buffer_size 缓冲区大小
+ * @return size_t 实际写入的字节数，0表示失败
+ */
+size_t bipupu_protocol_create_unbind_confirm(uint32_t timestamp, uint8_t* buffer, size_t buffer_size);
 
 /**
  * @brief 验证数据包的基本有效性

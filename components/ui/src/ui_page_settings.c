@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include <stdio.h>
 #include <string.h>
+#include "ble_manager.h"
 
 static const char* TAG = "PAGE_SETTINGS";
 
@@ -15,6 +16,7 @@ typedef enum {
     SETTING_BRIGHTNESS,    // 亮度调节
     SETTING_FLASHLIGHT,    // 手电筒开关
     SETTING_LOCKSCREEN,    // 锁屏立即进入屏保
+    SETTING_UNBIND,        // 解绑设备
     SETTING_RESTART,       // 重启系统
     SETTING_ABOUT,         // 关于设备
     SETTING_BACK,          // 返回
@@ -25,6 +27,7 @@ static const char* s_setting_names[] = {
     "屏幕亮度",
     "手电筒",
     "锁屏",
+    "解绑设备",
     "重启",
     "关于",
     "← 返回"
@@ -33,6 +36,7 @@ static const char* s_setting_names[] = {
 static int s_selected_item = 0;
 static bool s_editing = false;  // 是否正在编辑某个设置项
 static bool s_show_about = false;  // 显示关于页面
+static bool s_show_unbind_confirm = false;  // 显示解绑确认页面
 
 // 滚动相关参数
 #define ITEMS_PER_PAGE 4  // 每页显示的设置项数量
@@ -51,6 +55,7 @@ static void page_on_exit(void) {
     ESP_LOGD(TAG, "Exiting Settings Page");
     s_editing = false;
     s_show_about = false;
+    s_show_unbind_confirm = false;
 }
 
 /* ================== 渲染关于页面 ================== */
@@ -65,6 +70,27 @@ static void render_about(void) {
     // 设备信息
     board_display_text(4, 26, "BIPI Pager v1.0");
     board_display_text(4, 40, "ESP32-C3 BLE");
+    
+    board_display_end();
+}
+
+/* ================== 渲染解绑确认页面 ================== */
+static void render_unbind_confirm(void) {
+    board_display_begin();
+    board_display_set_font(u8g2_font_wqy12_t_gb2312a);
+    
+    // 标题栏
+    board_display_rect(0, 12, 128, 1, true);
+    ui_draw_text_centered(0, 10, 128, "解绑确认");
+    
+    // 确认信息
+    board_display_text(4, 26, "确定要解绑设备吗？");
+    board_display_text(4, 40, "解绑后需要重新绑定");
+    board_display_text(4, 54, "才能使用蓝牙功能");
+    
+    // 操作提示
+    board_display_text(4, 68, "确认: 上键");
+    board_display_text(64, 68, "取消: 下键");
     
     board_display_end();
 }
@@ -124,6 +150,7 @@ static void render_settings(void) {
             }
             case SETTING_ABOUT:
             case SETTING_LOCKSCREEN:
+            case SETTING_UNBIND:
             case SETTING_RESTART:
                 // 无值显示
                 break;
@@ -147,6 +174,8 @@ static void render_settings(void) {
 static void tick(void) {
     if (s_show_about) {
         render_about();
+    } else if (s_show_unbind_confirm) {
+        render_unbind_confirm();
     } else {
         render_settings();
     }
@@ -154,11 +183,28 @@ static void tick(void) {
 
 /* ================== 按键处理 ================== */
 static void on_key(board_key_t key) {
-    ESP_LOGD(TAG, "Settings key: %d, editing: %d, about: %d", key, s_editing, s_show_about);
+    ESP_LOGD(TAG, "Settings key: %d, editing: %d, about: %d, unbind: %d", 
+             key, s_editing, s_show_about, s_show_unbind_confirm);
     
     // 关于页面：任意键返回
     if (s_show_about) {
         s_show_about = false;
+        return;
+    }
+    
+    // 解绑确认页面
+    if (s_show_unbind_confirm) {
+        if (key == BOARD_KEY_UP) {
+            // 确认解绑
+            ESP_LOGI(TAG, "用户确认解绑设备");
+            extern void ble_manager_force_reset_bonds(void);
+            ble_manager_force_reset_bonds();
+            s_show_unbind_confirm = false;
+        } else if (key == BOARD_KEY_DOWN || key == BOARD_KEY_BACK) {
+            // 取消解绑
+            ESP_LOGI(TAG, "用户取消解绑");
+            s_show_unbind_confirm = false;
+        }
         return;
     }
     
@@ -212,6 +258,10 @@ static void on_key(board_key_t key) {
                     case SETTING_LOCKSCREEN:
                         // 立即进入屏保/锁屏
                         ui_enter_standby();
+                        break;
+                    case SETTING_UNBIND:
+                        // 显示解绑确认页面
+                        s_show_unbind_confirm = true;
                         break;
                     case SETTING_RESTART:
                         // 执行系统重启

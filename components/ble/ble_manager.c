@@ -26,13 +26,24 @@
 #include <string.h>
 #include <time.h>
 
+
+// --- 绑定相关常量 ---
+#define BINDING_NVS_NAMESPACE "ble_binding"
+#define BINDING_NVS_KEY "bound_device"
+#define BINDING_NVS_NAME_KEY "bound_name"
+
 // --- 全局状态 ---
 static const char *TAG = "BLE_MANAGER";
-static uint16_t conn_handle = BLE_HS_CONN_HANDLE_NONE;
-static uint8_t addr_type;
-bool ble_is_connected = false; // 暴露给外部模块
-static ble_state_t current_state = BLE_STATE_IDLE;
-static ble_message_callback_t message_callback = NULL;
+static char s_bound_device_addr[18] = {0}; // 存储绑定的设备地址
+static char s_bound_device_name[32] = {0}; // 存储绑定的设备名称
+static bool s_is_bound = false; // 是否已绑定
+
+// 绑定相关函数声明
+static void handle_binding_packet(const uint8_t* data, size_t length);
+static void save_binding_info(void);
+static void clear_binding_info(void);
+static void load_binding_info(void);
+static bool check_binding_match(void);
 
 /* ================== 私有常量定义 ================== */
 
@@ -57,9 +68,10 @@ static ble_state_t s_ble_state = BLE_STATE_UNINITIALIZED;
 /** 连接状态 */
 static bool s_ble_connected = false;
 static uint16_t s_conn_handle = 0xFFFF;  /**< BLE_HS_CONN_HANDLE_NONE */
-
-/** 设备地址类型 */
 static uint8_t s_own_addr_type;
+
+/** 外部可见的连接状态 */
+bool ble_is_connected = false;
 
 /** 错误计数 */
 static uint32_t s_error_count = 0;
@@ -171,13 +183,19 @@ static void handle_received_packet(const uint8_t* data, size_t length)
                     packet.timestamp, packet.text);
             if (s_message_callback) {
                 // 默认发送者为 "App"
-                s_message_callback("App", packet.text, packet.timestamp);
+                s_message_callback("App", packet.text);
             }
             break;
             
         case BIPUPU_MSG_ACKNOWLEDGEMENT:
             ESP_LOGI(TAG, "收到确认响应: timestamp=%u", packet.timestamp);
             // 暂时不处理确认响应
+            break;
+            
+        case BIPUPU_MSG_BINDING_INFO:
+        case BIPUPU_MSG_UNBIND_COMMAND:
+            ESP_LOGI(TAG, "收到绑定相关消息: type=0x%02X", packet.message_type);
+            handle_binding_packet(data, length);
             break;
             
         default:
@@ -227,6 +245,190 @@ static int nus_tx_write_cb(uint16_t conn_handle, uint16_t attr_handle,
     
     free(data);
     return 0;
+}
+
+/**
+ * @brief 处理绑定相关数据包
+ */
+static void handle_binding_packet(const uint8_t* data, size_t length)
+{
+    bipupu_parsed_packet_t parsed;
+    if (!bipupu_protocol_parse(data, length, &parsed)) {
+        ESP_LOGE(TAG, "解析绑定数据包失败");
+        return;
+    }
+    
+    switch (parsed.message_type) {
+        case BIPUPU_MSG_BINDING_INFO:
+            ESP_LOGI(TAG, "收到绑定信息");
+            
+            // 解析绑定信息
+            char json_str[256];
+            bipupu_protocol_decode_utf8_safe(parsed.data, parsed.data_length, json_str);
+            ESP_LOGI(TAG, "收到绑定信息: %s", json_str);
+            
+            // 保存绑定信息到NVS
+            save_binding_info();
+            break;
+            
+        case BIPUPU_MSG_UNBIND_COMMAND:
+            ESP_LOGI(TAG, "收到解绑命令");
+            
+            // 清除绑定信息
+            clear_binding_info();
+            
+            // 断开连接
+            if (s_ble_connected && s_conn_handle != 0xFFFF) {
+                ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            }
+            break;
+            
+        default:
+            break;
+    }
+}
+
+/**
+ * @brief 保存绑定信息到NVS
+ */
+static void save_binding_info(void)
+{
+    // 获取当前连接的设备地址
+    struct ble_gap_conn_desc desc;
+    int rc = ble_gap_conn_find(s_conn_handle, &desc);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "获取连接信息失败: %d", rc);
+        return;
+    }
+    
+    // 格式化设备地址
+    char addr_str[18];
+    snprintf(addr_str, sizeof(addr_str), "%02x:%02x:%02x:%02x:%02x:%02x",
+             desc.peer_id_addr.val[5], desc.peer_id_addr.val[4], desc.peer_id_addr.val[3],
+             desc.peer_id_addr.val[2], desc.peer_id_addr.val[1], desc.peer_id_addr.val[0]);
+    
+    // 保存到NVS
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(BINDING_NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "打开NVS失败: %s", esp_err_to_name(err));
+        return;
+    }
+    
+    err = nvs_set_str(nvs_handle, BINDING_NVS_KEY, addr_str);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "保存绑定地址失败: %s", esp_err_to_name(err));
+        nvs_close(nvs_handle);
+        return;
+    }
+    
+    // 保存设备名称（如果有）
+    if (strlen(s_bound_device_name) > 0) {
+        err = nvs_set_str(nvs_handle, BINDING_NVS_NAME_KEY, s_bound_device_name);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "保存设备名称失败: %s", esp_err_to_name(err));
+        }
+    }
+    
+    err = nvs_commit(nvs_handle);
+    nvs_close(nvs_handle);
+    
+    if (err == ESP_OK) {
+        strncpy(s_bound_device_addr, addr_str, sizeof(s_bound_device_addr) - 1);
+        s_is_bound = true;
+        ESP_LOGI(TAG, "绑定信息已保存: %s", addr_str);
+    }
+}
+
+/**
+ * @brief 清除绑定信息
+ */
+static void clear_binding_info(void)
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(BINDING_NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "打开NVS失败: %s", esp_err_to_name(err));
+        return;
+    }
+    
+    err = nvs_erase_key(nvs_handle, BINDING_NVS_KEY);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "清除绑定地址失败: %s", esp_err_to_name(err));
+    }
+    
+    err = nvs_erase_key(nvs_handle, BINDING_NVS_NAME_KEY);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "清除设备名称失败: %s", esp_err_to_name(err));
+    }
+    
+    err = nvs_commit(nvs_handle);
+    nvs_close(nvs_handle);
+    
+    if (err == ESP_OK) {
+        memset(s_bound_device_addr, 0, sizeof(s_bound_device_addr));
+        memset(s_bound_device_name, 0, sizeof(s_bound_device_name));
+        s_is_bound = false;
+        ESP_LOGI(TAG, "绑定信息已清除");
+    }
+}
+
+/**
+ * @brief 加载绑定信息
+ */
+static void load_binding_info(void)
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(BINDING_NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "打开NVS失败或没有绑定信息: %s", esp_err_to_name(err));
+        return;
+    }
+    
+    size_t required_size = 0;
+    err = nvs_get_str(nvs_handle, BINDING_NVS_KEY, NULL, &required_size);
+    if (err == ESP_OK && required_size > 0) {
+        err = nvs_get_str(nvs_handle, BINDING_NVS_KEY, s_bound_device_addr, &required_size);
+        if (err == ESP_OK) {
+            s_is_bound = true;
+            ESP_LOGI(TAG, "加载绑定地址: %s", s_bound_device_addr);
+        }
+    }
+    
+    // 加载设备名称
+    required_size = 0;
+    err = nvs_get_str(nvs_handle, BINDING_NVS_NAME_KEY, NULL, &required_size);
+    if (err == ESP_OK && required_size > 0) {
+        err = nvs_get_str(nvs_handle, BINDING_NVS_NAME_KEY, s_bound_device_name, &required_size);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "加载设备名称: %s", s_bound_device_name);
+        }
+    }
+    
+    nvs_close(nvs_handle);
+}
+
+/**
+ * @brief 检查当前连接是否与绑定匹配
+ */
+static bool check_binding_match(void)
+{
+    if (!s_is_bound || !ble_is_connected) {
+        return false;
+    }
+    
+    struct ble_gap_conn_desc desc;
+    int rc = ble_gap_conn_find(s_conn_handle, &desc);
+    if (rc != 0) {
+        return false;
+    }
+    
+    char current_addr[18];
+    snprintf(current_addr, sizeof(current_addr), "%02x:%02x:%02x:%02x:%02x:%02x",
+             desc.peer_id_addr.val[5], desc.peer_id_addr.val[4], desc.peer_id_addr.val[3],
+             desc.peer_id_addr.val[2], desc.peer_id_addr.val[1], desc.peer_id_addr.val[0]);
+    
+    return strcmp(current_addr, s_bound_device_addr) == 0;
 }
 
 /**
@@ -312,7 +514,7 @@ static void ble_on_sync(void)
     }
     
     ESP_LOGI(TAG, "BLE 主机同步完成");
-    update_ble_state(BLE_STATE_INITIALIZED);
+    update_ble_state(BLE_STATE_IDLE);
     
     // 开始广播
     ble_advertise();
@@ -331,11 +533,19 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             if (event->connect.status == 0) {
                 ESP_LOGI(TAG, "设备已连接");
                 s_ble_connected = true;
+                ble_is_connected = true;
                 s_conn_handle = event->connect.conn_handle;
                 update_ble_state(BLE_STATE_CONNECTED);
-                
+    
                 if (s_connection_callback) {
                     s_connection_callback(true);
+                }
+                
+                // 检查绑定匹配
+                if (check_binding_match()) {
+                    ESP_LOGI(TAG, "连接设备与绑定设备匹配");
+                } else if (s_is_bound) {
+                    ESP_LOGW(TAG, "连接设备与绑定设备不匹配");
                 }
             } else {
                 ESP_LOGE(TAG, "连接失败: %d", event->connect.status);
@@ -346,10 +556,12 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         case BLE_GAP_EVENT_DISCONNECT:
             // 连接断开
             ESP_LOGI(TAG, "设备已断开连接: reason=%d", event->disconnect.reason);
+            ESP_LOGI(TAG, "设备已断开连接");
             s_ble_connected = false;
+            ble_is_connected = false;
             s_conn_handle = 0xFFFF;
-            update_ble_state(BLE_STATE_INITIALIZED);
-            
+            update_ble_state(BLE_STATE_IDLE);
+    
             if (s_connection_callback) {
                 s_connection_callback(false);
             }
@@ -361,7 +573,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         case BLE_GAP_EVENT_ADV_COMPLETE:
             // 广播完成
             ESP_LOGI(TAG, "广播完成");
-            update_ble_state(BLE_STATE_INITIALIZED);
+            update_ble_state(BLE_STATE_IDLE);
             break;
             
         case BLE_GAP_EVENT_SUBSCRIBE:
@@ -444,7 +656,7 @@ esp_err_t ble_manager_init(void)
     }
     
     // 蓝牙管理器正在初始化
-    s_ble_state = BLE_STATE_INITIALIZED; // 临时设置为已初始化状态
+    s_ble_state = BLE_STATE_IDLE; // 临时设置为空闲状态
     
     // 初始化NVS
     esp_err_t ret = nvs_flash_init();
@@ -479,6 +691,9 @@ esp_err_t ble_manager_init(void)
     // 设置设备名称
     generate_device_name();
     ble_svc_gap_device_name_set(s_device_name);
+    
+    // 加载绑定信息
+    load_binding_info();
     
     // 启动BLE主机任务
     nimble_port_freertos_init(ble_host_task);
@@ -516,7 +731,7 @@ esp_err_t ble_manager_deinit(void)
 
 esp_err_t ble_manager_start_advertising(void)
 {
-    if (s_ble_state != BLE_STATE_INITIALIZED && s_ble_state != BLE_STATE_ERROR) {
+    if (s_ble_state != BLE_STATE_IDLE && s_ble_state != BLE_STATE_ERROR) {
         ESP_LOGW(TAG, "无效状态，无法开始广播: %d", s_ble_state);
         return ESP_ERR_INVALID_STATE;
     }
@@ -542,7 +757,7 @@ esp_err_t ble_manager_stop_advertising(void)
         return ESP_FAIL;
     }
     
-    update_ble_state(BLE_STATE_INITIALIZED);
+    update_ble_state(BLE_STATE_IDLE);
     ESP_LOGI(TAG, "蓝牙广播已停止");
     return ESP_OK;
 }
@@ -665,4 +880,97 @@ esp_err_t ble_manager_send_time_sync_response(uint32_t timestamp)
     
     ESP_LOGI(TAG, "时间同步响应发送成功: timestamp=%u", timestamp);
     return ESP_OK;
+}
+
+/**
+ * @brief 发送绑定信息到设备
+ */
+esp_err_t ble_manager_send_binding_info(const char* app_id, const char* user_name)
+{
+    if (!app_id || !user_name) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // 创建简单的绑定信息字符串
+    char binding_info[256];
+    int len = snprintf(binding_info, sizeof(binding_info),
+                      "{\"appId\":\"%s\",\"userName\":\"%s\",\"timestamp\":%lld,\"platform\":\"esp32\"}",
+                      app_id, user_name, (long long)time(NULL));
+    
+    if (len < 0 || len >= (int)sizeof(binding_info)) {
+        ESP_LOGE(TAG, "创建绑定信息字符串失败");
+        return ESP_FAIL;
+    }
+    
+    // 创建绑定信息数据包
+    uint8_t buffer[512];
+    size_t packet_length = bipupu_protocol_create_binding_info(
+        (uint32_t)time(NULL), binding_info, strlen(binding_info), buffer, sizeof(buffer));
+    
+    if (packet_length == 0) {
+        ESP_LOGE(TAG, "创建绑定信息数据包失败");
+        return ESP_FAIL;
+    }
+    
+    // 发送数据
+    esp_err_t ret = send_data_via_nus_rx(buffer, packet_length);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "发送绑定信息失败");
+        return ret;
+    }
+    
+    ESP_LOGI(TAG, "绑定信息发送成功: appId=%s, userName=%s", app_id, user_name);
+    return ESP_OK;
+}
+
+/**
+ * @brief 发送解绑确认到设备
+ */
+esp_err_t ble_manager_send_unbind_confirm(void)
+{
+    // 创建解绑确认数据包
+    uint8_t buffer[64];
+    size_t packet_length = bipupu_protocol_create_unbind_confirm(
+        (uint32_t)time(NULL), buffer, sizeof(buffer));
+    
+    if (packet_length == 0) {
+        ESP_LOGE(TAG, "创建解绑确认数据包失败");
+        return ESP_FAIL;
+    }
+    
+    // 发送数据
+    esp_err_t ret = send_data_via_nus_rx(buffer, packet_length);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "发送解绑确认失败");
+        return ret;
+    }
+    
+    ESP_LOGI(TAG, "解绑确认发送成功");
+    return ESP_OK;
+}
+
+/**
+ * @brief 强制清除所有绑定信息并断开连接
+ * 用于本地按键解绑逻辑
+ */
+void ble_manager_force_reset_bonds(void)
+{
+    ESP_LOGI(TAG, "强制清除绑定信息");
+    
+    // 清除NVS中的绑定信息
+    clear_binding_info();
+    
+    // 如果当前有连接，断开连接
+    if (s_ble_connected && s_conn_handle != 0xFFFF) {
+        ESP_LOGI(TAG, "断开当前连接");
+        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        ble_is_connected = false;
+    }
+    
+    // 重置绑定状态
+    s_is_bound = false;
+    memset(s_bound_device_addr, 0, sizeof(s_bound_device_addr));
+    memset(s_bound_device_name, 0, sizeof(s_bound_device_name));
+    
+    ESP_LOGI(TAG, "绑定信息已强制清除");
 }

@@ -328,3 +328,82 @@ size_t bipupu_protocol_create_text_message(uint32_t timestamp, const char* text,
     
     return packet_length;
 }
+
+/**
+ * @brief 创建绑定信息数据包
+ */
+size_t bipupu_protocol_create_binding_info(uint32_t timestamp, const char* binding_info, size_t info_length,
+                                          uint8_t* buffer, size_t buffer_size)
+{
+    if (!binding_info || info_length == 0 || !buffer) {
+        ESP_LOGE(TAG, "无效参数");
+        return 0;
+    }
+    
+    // 检查信息长度
+    if (info_length > BIPUPU_MAX_DATA_LENGTH) {
+        ESP_LOGW(TAG, "绑定信息过长: %zu 字节 (最大 %d 字节)", info_length, BIPUPU_MAX_DATA_LENGTH);
+        info_length = BIPUPU_MAX_DATA_LENGTH;
+    }
+    
+    // 计算所需缓冲区大小
+    size_t required_size = BIPUPU_HEADER_LENGTH + info_length + BIPUPU_CHECKSUM_LENGTH;
+    if (buffer_size < required_size) {
+        ESP_LOGE(TAG, "缓冲区不足: %zu 字节 (需要 %zu 字节)", buffer_size, required_size);
+        return 0;
+    }
+    
+    // 构建数据包
+    buffer[0] = BIPUPU_PROTOCOL_HEADER;  // 协议头
+    write_le32(&buffer[1], timestamp);   // 时间戳
+    buffer[5] = BIPUPU_MSG_BINDING_INFO; // 消息类型
+    write_le16(&buffer[6], (uint16_t)info_length); // 数据长度
+    
+    // 复制绑定信息数据
+    if (info_length > 0) {
+        memcpy(&buffer[BIPUPU_HEADER_LENGTH], binding_info, info_length);
+    }
+    
+    // 计算校验和 (不包括校验和本身)
+    size_t packet_length = BIPUPU_HEADER_LENGTH + info_length + BIPUPU_CHECKSUM_LENGTH;
+    uint8_t checksum = bipupu_protocol_calculate_checksum(buffer, packet_length - 1);
+    buffer[packet_length - 1] = checksum;
+    
+    ESP_LOGI(TAG, "创建绑定信息数据包: 时间戳=%u, 信息长度=%zu, 总长度=%zu", 
+            timestamp, info_length, packet_length);
+    
+    return packet_length;
+}
+
+/**
+ * @brief 创建解绑确认数据包
+ */
+size_t bipupu_protocol_create_unbind_confirm(uint32_t timestamp, uint8_t* buffer, size_t buffer_size)
+{
+    if (!buffer) {
+        ESP_LOGE(TAG, "无效参数");
+        return 0;
+    }
+    
+    // 计算所需缓冲区大小
+    size_t required_size = BIPUPU_HEADER_LENGTH + BIPUPU_CHECKSUM_LENGTH;
+    if (buffer_size < required_size) {
+        ESP_LOGE(TAG, "缓冲区不足: %zu 字节 (需要 %zu 字节)", buffer_size, required_size);
+        return 0;
+    }
+    
+    // 构建数据包
+    buffer[0] = BIPUPU_PROTOCOL_HEADER;  // 协议头
+    write_le32(&buffer[1], timestamp);   // 时间戳
+    buffer[5] = BIPUPU_MSG_UNBIND_COMMAND; // 消息类型
+    write_le16(&buffer[6], 0);           // 数据长度 (0)
+    
+    // 计算校验和 (不包括校验和本身)
+    size_t packet_length = BIPUPU_HEADER_LENGTH + BIPUPU_CHECKSUM_LENGTH;
+    uint8_t checksum = bipupu_protocol_calculate_checksum(buffer, packet_length - 1);
+    buffer[packet_length - 1] = checksum;
+    
+    ESP_LOGI(TAG, "创建解绑确认数据包: 时间戳=%u, 总长度=%zu", timestamp, packet_length);
+    
+    return packet_length;
+}
