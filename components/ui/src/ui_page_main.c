@@ -22,8 +22,20 @@ static void page_on_exit(void) {
     s_back_long_pressed = false;
 }
 
-static void tick(void) {
-    // 检测长按状态 (用于手电筒)
+// 渲染上下文
+typedef struct {
+    int total_msgs;
+    int unread_msgs;
+} main_render_ctx_t;
+
+static main_render_ctx_t s_ctx;
+
+static uint32_t update(void) {
+    // 1. 抓取渲染所需数据 (受锁保护)
+    s_ctx.total_msgs = ui_get_message_count();
+    s_ctx.unread_msgs = ui_get_unread_count();
+
+    // 2. 检测长按状态 (用于手电筒)
     if (s_back_press_start > 0 && !s_back_long_pressed) {
         uint32_t duration = board_time_ms() - s_back_press_start;
         if (duration >= LONG_PRESS_THRESHOLD_MS) {
@@ -31,11 +43,14 @@ static void tick(void) {
             ui_toggle_flashlight();
             ESP_LOGD(TAG, "Long press detected - flashlight toggled");
         }
+        return 100; // 长按检测期间，频繁唤醒 (10Hz)
     }
-    
-    int total = ui_get_message_count();
-    int unread = ui_get_unread_count();
-    ui_render_main(total, unread);
+    return 1000; // 普通状态，每秒更新一次时钟
+}
+
+static void render(void) {
+    // 使用上下文数据渲染
+    ui_render_main(s_ctx.total_msgs, s_ctx.unread_msgs);
 }
 
 static void on_key(board_key_t key) {
@@ -90,6 +105,7 @@ static void on_key(board_key_t key) {
 const ui_page_t page_main = {
     .on_enter = page_on_enter,
     .on_exit = page_on_exit,
-    .tick = tick,
+    .update = update,
+    .render = render,
     .on_key = on_key
 };

@@ -3,6 +3,13 @@
 #include "esp_log.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include "driver/ledc.h"
+#include "driver/gpio.h"
+#include "esp_err.h"
+#include "board.h"
+#include "board_pins.h"
+
+static const char* TAG = "BOARD_VIBRATE";
 
 /* ================== 震动状态机定义 ================== */
 
@@ -54,7 +61,7 @@ static void sm_set_idle(void) {
 
 void board_vibrate_init(void) {
     if (s_vibrate_initialized) {
-        ESP_LOGW(BOARD_TAG, "Vibrate motor already initialized");
+        ESP_LOGW(TAG, "Vibrate motor already initialized");
         return;
     }
 
@@ -68,7 +75,7 @@ void board_vibrate_init(void) {
     };
     esp_err_t ret = gpio_config(&vibrate_config);
     if (ret != ESP_OK) {
-        ESP_LOGE(BOARD_TAG, "Vibrate GPIO config failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Vibrate GPIO config failed: %s", esp_err_to_name(ret));
         return;
     }
 
@@ -82,7 +89,7 @@ void board_vibrate_init(void) {
     };
     ret = ledc_timer_config(&ledc_timer);
     if (ret != ESP_OK) {
-        ESP_LOGE(BOARD_TAG, "LEDC timer config failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "LEDC timer config failed: %s", esp_err_to_name(ret));
         return;
     }
 
@@ -98,7 +105,7 @@ void board_vibrate_init(void) {
     };
     ret = ledc_channel_config(&ledc_channel);
     if (ret != ESP_OK) {
-        ESP_LOGE(BOARD_TAG, "LEDC channel config failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "LEDC channel config failed: %s", esp_err_to_name(ret));
         return;
     }
 
@@ -108,7 +115,7 @@ void board_vibrate_init(void) {
     s_vibrate_initialized = true;
     sm_set_idle();
     
-    ESP_LOGI(BOARD_TAG, "Vibrate motor initialized (PWM %dHz) on GPIO%d",
+    ESP_LOGI(TAG, "Vibrate motor initialized (PWM %dHz) on GPIO%d",
              VIBRATE_LEDC_FREQ, BOARD_GPIO_VIBRATE);
 }
 
@@ -124,7 +131,7 @@ void board_vibrate_short(void) {
     s_sm_sub_state = 0;  // 0=震动
     vibrate_set_pwm(VIBRATE_DUTY_ON);
     
-    ESP_LOGD(BOARD_TAG, "Short vibrate started");
+    ESP_LOGD(TAG, "Short vibrate started");
 }
 
 void board_vibrate_double(void) {
@@ -139,14 +146,14 @@ void board_vibrate_double(void) {
     s_sm_sub_state = 0;  // 0=第一次震动
     vibrate_set_pwm(VIBRATE_DUTY_ON);
     
-    ESP_LOGD(BOARD_TAG, "Double vibrate started");
+    ESP_LOGD(TAG, "Double vibrate started");
 }
 
 void board_vibrate_off(void) {
     if (!s_vibrate_initialized) return;
     
     sm_set_idle();
-    ESP_LOGD(BOARD_TAG, "Vibrate forced OFF");
+    ESP_LOGD(TAG, "Vibrate forced OFF");
 }
 
 /* ================== 震动状态机轮询 ================== */
@@ -162,7 +169,7 @@ void board_vibrate_tick(void) {
             // 短震动：震动 150ms -> 停止
             if (now - s_sm_last_change >= VIB_SHORT_ON_MS) {
                 sm_set_idle();
-                ESP_LOGD(BOARD_TAG, "Short vibrate completed");
+                ESP_LOGD(TAG, "Short vibrate completed");
             }
             break;
         }
@@ -187,7 +194,7 @@ void board_vibrate_tick(void) {
                 // 第二次震动
                 if (now - s_sm_last_change >= VIB_DOUBLE_ON_MS) {
                     sm_set_idle();
-                    ESP_LOGD(BOARD_TAG, "Double vibrate completed");
+                    ESP_LOGD(TAG, "Double vibrate completed");
                 }
             }
             break;

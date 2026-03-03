@@ -35,9 +35,8 @@ void      board_delay_ms(uint32_t ms);
 
 /* ================== 板级初始化函数 ================== */
 
+esp_err_t board_init(void);
 esp_err_t board_i2c_init(void);
-// Transmit helper: sends data in chunks with retry, returns esp_err_t
-esp_err_t board_i2c_transmit_chunked(i2c_master_dev_handle_t dev, const uint8_t *data, size_t len, size_t chunk_size, TickType_t timeout);
 void board_display_init(void);
 void board_key_init(void);
 void board_vibrate_init(void);
@@ -137,49 +136,8 @@ uint8_t     board_battery_percent(void);
 bool        board_battery_is_charging(void);
 
 /* ================== 电池管理接口 ================== */
+// 已移除：电池管理逻辑已上移至 app 层
 
-/**
- * @brief 电池管理初始化
- */
-void board_battery_manager_init(void);
-
-/**
- * @brief 电池状态轮询处理
- *
- * 该函数应定期调用，处理电池状态监测、低电压保护等功能
- */
-void board_battery_manager_tick(void);
-
-/**
- * @brief 获取当前电池电量百分比
- * @return 电池电量百分比 (0-100)
- */
-uint8_t board_battery_manager_get_percent(void);
-
-/**
- * @brief 获取当前电池电压
- * @return 电池电压 (单位: V)
- */
-float board_battery_manager_get_voltage(void);
-
-/**
- * @brief 检查电池是否在充电
- * @return true 表示正在充电，false 表示未充电
- */
-bool board_battery_manager_is_charging(void);
-
-/**
- * @brief 检查是否处于低电压模式
- * @return true 表示处于低电压模式
- */
-bool board_battery_manager_is_low_voltage_mode(void);
-
-/**
- * @brief 获取电池管理的更新间隔（用于节能管理）
- * @param is_usb_power 当前供电方式
- * @return 推荐的检测间隔（毫秒）
- */
-uint32_t board_battery_manager_get_update_interval(bool is_usb_power);
 
 /* ================== RTC 与 系统 ================== */
 

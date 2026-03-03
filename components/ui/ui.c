@@ -43,6 +43,21 @@ static const ui_page_t* s_pages[] = {
     [UI_STATE_SETTINGS] = &page_settings,
 };
 
+/* ================== 脏标记与回调 ================== */
+static bool s_needs_redraw = true;
+static void (*s_redraw_cb)(void) = NULL;
+
+void ui_request_redraw(void) {
+    s_needs_redraw = true;
+    if (s_redraw_cb) {
+        s_redraw_cb();
+    }
+}
+
+void ui_set_redraw_callback(void (*cb)(void)) {
+    s_redraw_cb = cb;
+}
+
 /* ================== 内部状态定义 ================== */
 typedef struct {
     ui_state_enum_t state;
@@ -60,9 +75,12 @@ static ui_context_t s_ui;
 int ui_get_message_count(void) { return s_ui.message_count; }
 int ui_get_current_message_idx(void) { return s_ui.current_msg_idx; }
 void ui_set_current_message_idx(int idx) {
-    s_ui.current_msg_idx = idx;
-    // persist current index
-    storage_save_messages(s_ui.messages, s_ui.message_count, s_ui.current_msg_idx);
+    if (s_ui.current_msg_idx != idx) {
+        s_ui.current_msg_idx = idx;
+        // 优化：仅在内存中更新，不立即写 Flash
+        // storage_save_messages(s_ui.messages, s_ui.message_count, s_ui.current_msg_idx);
+        ui_request_redraw();
+    }
 }
 
 int ui_get_unread_count(void) {
@@ -120,6 +138,8 @@ void ui_change_page(ui_state_enum_t new_state) {
         ESP_LOGD(UI_TAG, "Calling enter handler for state %d", new_state);
         s_pages[new_state]->on_enter();
     }
+    
+    ui_request_redraw();
 
     ESP_LOGD(UI_TAG, "Page change completed: %d -> %d", old_state, new_state);
 }
@@ -160,33 +180,61 @@ void ui_init(void) {
     if (s_pages[s_ui.state] && s_pages[s_ui.state]->on_enter) {
         s_pages[s_ui.state]->on_enter();
     }
+    ui_request_redraw();
     ESP_LOGI(UI_TAG, "UI Manager initialized");
 }
 
-void ui_tick(void) {
+uint32_t ui_tick(void) {
     if (!ui_lock()) {
-        ESP_LOGW(UI_TAG, "ui_tick: failed to acquire lock, skip frame");
-        return;
+        ESP_LOGW(UI_TAG, "ui_tick: failed to acquire lock, retry soon");
+        return 100;
     }
 
+    uint32_t next_sleep_ms = 1000; // 默认最大休眠时间
+    bool do_render = false;
+    ui_state_enum_t render_state = s_ui.state;
+
+    // 1. 逻辑更新 (持有锁)
     if (s_ui.state != UI_STATE_STANDBY) {
+        // 检查自动待机超时
         if (board_time_ms() - s_ui.last_activity_time > STANDBY_TIMEOUT_MS) {
             ESP_LOGD(UI_TAG, "Activity timeout, entering standby");
-            ui_enter_standby();
-            ui_unlock();
-            return;
-        }
-
-        if (s_pages[s_ui.state] && s_pages[s_ui.state]->tick) {
-            s_pages[s_ui.state]->tick();
+            ui_enter_standby(); // 状态变为 STANDBY
+            render_state = UI_STATE_STANDBY;
+            s_needs_redraw = true;
+            next_sleep_ms = 50; // 待机动画刷新率
+        } else {
+            // 调用当前页面的 update 逻辑
+            if (s_pages[s_ui.state] && s_pages[s_ui.state]->update) {
+                uint32_t page_sleep = s_pages[s_ui.state]->update();
+                if (page_sleep < next_sleep_ms) next_sleep_ms = page_sleep;
+            }
         }
     } else {
-        // 在待机状态下，周期性渲染屏保并等待按键唤醒
-        ui_render_standby();
-        ESP_LOGD(UI_TAG, "In standby state, rendered standby frame");
+        // 待机状态逻辑
+        next_sleep_ms = 50; // 动画刷新率 20fps
+        s_needs_redraw = true; // 待机状态始终重绘动画
     }
 
+    // 2. 决定是否渲染
+    if (s_needs_redraw) {
+        do_render = true;
+        s_needs_redraw = false; // 清除标志
+    }
+
+    // 3. 释放锁 (关键优化：渲染过程不持有锁，避免阻塞按键中断)
     ui_unlock();
+
+    // 4. 执行渲染 (无锁状态)
+    if (do_render) {
+        if (render_state == UI_STATE_STANDBY) {
+            ui_render_standby();
+        } else if (s_pages[render_state] && s_pages[render_state]->render) {
+            s_pages[render_state]->render();
+        }
+    }
+
+    return next_sleep_ms > 0 ? next_sleep_ms : 1000;
 }
 
 void ui_on_key(board_key_t key) {
@@ -218,6 +266,8 @@ void ui_on_key(board_key_t key) {
     if (s_pages[s_ui.state] && s_pages[s_ui.state]->on_key) {
         ESP_LOGI(UI_TAG, "Passing key %d to page handler for state %d", key, s_ui.state);
         s_pages[s_ui.state]->on_key(key);
+        // 假设按键处理会导致 UI 变化，请求重绘
+        ui_request_redraw();
     } else {
         ESP_LOGW(UI_TAG, "No key handler for state %d", s_ui.state);
     }
@@ -256,6 +306,7 @@ void ui_show_message_with_timestamp(const char* sender, const char* text, uint32
 
     ui_wake_up();
     s_ui.current_msg_idx = s_ui.message_count - 1;
+    // ui_change_page 会调用 ui_request_redraw
     ui_change_page(UI_STATE_MESSAGE_READ);
     board_notify();
     // 来信提醒 LED 闪烁 + 震动
@@ -313,6 +364,8 @@ void ui_delete_current_message(void) {
 
     // 持久化
     storage_save_messages(s_ui.messages, s_ui.message_count, s_ui.current_msg_idx);
+    
+    ui_request_redraw();
 
     ESP_LOGI(UI_TAG, "Deleted message at idx %d, remaining: %d", idx, s_ui.message_count);
 }
@@ -332,7 +385,9 @@ void ui_toggle_flashlight(void) {
         ESP_LOGI(UI_TAG, "Flashlight ON");
     } else {
         ESP_LOGI(UI_TAG, "Flashlight OFF");
+        board_leds_off(); // 确保关闭
     }
+    ui_request_redraw();
 }
 
 /* ================== 亮度控制 ================== */
@@ -350,6 +405,17 @@ void ui_set_brightness(uint8_t level) {
 
     // 保存到存储
     storage_save_brightness(level);
+    
+    ui_request_redraw();
 
     ESP_LOGI(UI_TAG, "Brightness set to %d%%", level);
+}
+
+/* ================== 系统控制 ================== */
+void ui_system_restart(void) {
+    ESP_LOGI(UI_TAG, "System restart requested from UI");
+    // 关闭显示以给用户重启反馈
+    board_display_set_contrast(0);
+    board_execute_cleanup();
+    board_system_restart();
 }

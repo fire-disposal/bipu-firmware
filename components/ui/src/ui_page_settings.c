@@ -43,6 +43,18 @@ static bool s_show_unbind_confirm = false;  // 显示解绑确认页面
 #define LINE_HEIGHT 12    // 每行高度
 #define CONTENT_START_Y 24 // 内容起始Y坐标
 
+// 渲染上下文
+typedef struct {
+    int selected_item;
+    bool editing;
+    bool show_about;
+    bool show_unbind_confirm;
+    uint8_t brightness;
+    bool flashlight_on;
+} settings_render_ctx_t;
+
+static settings_render_ctx_t s_ctx;
+
 /* ================== 页面生命周期 ================== */
 static void page_on_enter(void) {
     ESP_LOGD(TAG, "Entering Settings Page");
@@ -105,7 +117,7 @@ static void render_settings(void) {
     ui_draw_text_centered(0, 10, 128, "设置");
     
     // 计算当前页码和起始项
-    int page = s_selected_item / ITEMS_PER_PAGE;
+    int page = s_ctx.selected_item / ITEMS_PER_PAGE;
     int start_item = page * ITEMS_PER_PAGE;
     int end_item = start_item + ITEMS_PER_PAGE;
     if (end_item > SETTING_COUNT) end_item = SETTING_COUNT;
@@ -114,7 +126,7 @@ static void render_settings(void) {
     int y = CONTENT_START_Y;
     for (int i = start_item; i < end_item; i++) {
         // 选中标记
-        if (i == s_selected_item) {
+        if (i == s_ctx.selected_item) {
             // 选中行反色：白色背景 + 黑色文字
             board_display_set_draw_color(1);
             board_display_rect(0, y - LINE_HEIGHT + 2, 128, LINE_HEIGHT, true);
@@ -130,8 +142,8 @@ static void render_settings(void) {
         char value_str[32];
         switch (i) {
             case SETTING_BRIGHTNESS: {
-                uint8_t brightness = ui_get_brightness();
-                if (s_editing && i == s_selected_item) {
+                uint8_t brightness = s_ctx.brightness;
+                if (s_ctx.editing && i == s_ctx.selected_item) {
                     // 编辑模式：显示调节指示
                     snprintf(value_str, sizeof(value_str), "‹%d%%›", brightness);
                 } else {
@@ -142,7 +154,7 @@ static void render_settings(void) {
                 break;
             }
             case SETTING_FLASHLIGHT: {
-                bool on = ui_is_flashlight_on();
+                bool on = s_ctx.flashlight_on;
                 const char* state = on ? "开" : "关";
                 int tw = board_display_text_width(state);
                 board_display_text(124 - tw, y, state);
@@ -160,7 +172,7 @@ static void render_settings(void) {
         }
         
         // 恢复正常绘制模式
-        if (i == s_selected_item) {
+        if (i == s_ctx.selected_item) {
             board_display_set_draw_color(1);
             board_display_set_font_mode(0);
         }
@@ -171,10 +183,22 @@ static void render_settings(void) {
     board_display_end();
 }
 
-static void tick(void) {
-    if (s_show_about) {
+static uint32_t update(void) {
+    // 填充渲染上下文 (受锁保护)
+    s_ctx.selected_item = s_selected_item;
+    s_ctx.editing = s_editing;
+    s_ctx.show_about = s_show_about;
+    s_ctx.show_unbind_confirm = s_show_unbind_confirm;
+    s_ctx.brightness = ui_get_brightness();
+    s_ctx.flashlight_on = ui_is_flashlight_on();
+    
+    return 1000;
+}
+
+static void render(void) {
+    if (s_ctx.show_about) {
         render_about();
-    } else if (s_show_unbind_confirm) {
+    } else if (s_ctx.show_unbind_confirm) {
         render_unbind_confirm();
     } else {
         render_settings();
@@ -289,6 +313,7 @@ static void on_key(board_key_t key) {
 const ui_page_t page_settings = {
     .on_enter = page_on_enter,
     .on_exit = page_on_exit,
-    .tick = tick,
+    .update = update,
+    .render = render,
     .on_key = on_key,
 };

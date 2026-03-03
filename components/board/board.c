@@ -6,6 +6,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <sys/time.h>
 
 // I2C总线句柄定义
 i2c_master_bus_handle_t board_i2c_bus_handle = NULL;
@@ -99,4 +100,15 @@ void board_notify(void) {
   // 短震动提醒
   board_vibrate_short();
   ESP_LOGI(BOARD_TAG, "Notification triggered");
+}
+
+/* ================== 系统清理接口 ================== */
+void board_register_cleanup_callback(board_cleanup_callback_t callback) {
+  s_cleanup_callback = callback;
+}
+
+void board_execute_cleanup(void) {
+  if (s_cleanup_callback != NULL) {
+    s_cleanup_callback();
+  }
 }

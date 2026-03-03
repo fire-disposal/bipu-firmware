@@ -2,6 +2,9 @@
 #include "board.h"        // 公共接口
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include <string.h>
 
 /* ================== 按键相关实现 ================== */
@@ -10,6 +13,7 @@
 #define REPEAT_DELAY_MS 500   // 首次重复延迟 (增加以区分长按)
 #define REPEAT_RATE_MS 150    // 连续重复间隔
 #define LONG_PRESS_MS 800     // 长按阈值
+#define KEY_SCAN_INTERVAL_US 20000 // 20ms 扫描间隔
 
 // 按键事件类型
 typedef enum {
@@ -27,11 +31,12 @@ typedef struct {
     bool long_press_fired;     // 长按事件是否已触发
     bool repeat_enabled;       // 是否启用重复
     uint32_t last_repeat_time; // 上次重复时间
-    uint8_t debounce_counter;  // 去抖计数器
 } button_state_t;
 
 static button_state_t s_button_states[BUTTON_COUNT];
 static bool s_keys_initialized = false;
+static QueueHandle_t s_key_queue = NULL;
+static esp_timer_handle_t s_key_timer = NULL;
 
 // GPIO映射表 (避免switch开销)
 static const gpio_num_t s_button_gpios[BUTTON_COUNT] = {
@@ -75,7 +80,6 @@ static key_event_type_t button_process(int button) {
                 state->repeat_enabled = false;
                 state->last_repeat_time = current_time;
                 ESP_LOGD(BOARD_TAG, "Button %d pressed", button);
-                // 不立即返回事件，等待判断是短按还是长按
             } else if (!state->is_pressed && state->was_pressed) {
                 // 下降沿: 按键释放
                 uint32_t press_duration = current_time - state->press_start_time;
@@ -90,8 +94,8 @@ static key_event_type_t button_process(int button) {
             }
         }
     } else {
-        // 状态未变化时更新时间戳
-        state->last_change_time = current_time;
+        // 状态未变化时更新时间戳 (防止溢出或逻辑错误，其实可以不更新)
+        // state->last_change_time = current_time; 
     }
 
     // 长按检测 (按住时检测)
@@ -111,11 +115,31 @@ static key_event_type_t button_process(int button) {
         if (current_time - state->last_repeat_time >= REPEAT_RATE_MS) {
             state->last_repeat_time = current_time;
             event = KEY_EVENT_REPEAT;
-            ESP_LOGD(BOARD_TAG, "Button %d repeat", button);
+            // ESP_LOGD(BOARD_TAG, "Button %d repeat", button);
         }
     }
 
     return event;
+}
+
+static void key_timer_cb(void* arg) {
+    if (!s_keys_initialized || s_key_queue == NULL) return;
+
+    for (int i = 0; i < BUTTON_COUNT; i++) {
+        key_event_type_t event = button_process(i);
+        
+        if (event == KEY_EVENT_SHORT_PRESS || event == KEY_EVENT_LONG_PRESS) {
+            static const board_key_t key_map[BUTTON_COUNT] = {
+                BOARD_KEY_UP,
+                BOARD_KEY_DOWN,
+                BOARD_KEY_ENTER,
+                BOARD_KEY_BACK
+            };
+            board_key_t key = key_map[i];
+            // 发送到队列，不阻塞
+            xQueueSend(s_key_queue, &key, 0);
+        }
+    }
 }
 
 void board_key_init(void) {
@@ -143,7 +167,13 @@ void board_key_init(void) {
         ESP_LOGE(BOARD_TAG, "GPIO config failed: %s", esp_err_to_name(ret));
         return;
     }
-    ESP_LOGI(BOARD_TAG, "GPIO config successful");
+
+    // 初始化队列
+    s_key_queue = xQueueCreate(10, sizeof(board_key_t));
+    if (s_key_queue == NULL) {
+        ESP_LOGE(BOARD_TAG, "Failed to create key queue");
+        return;
+    }
 
     // 按键状态初始化 (使用memset更安全)
     memset(s_button_states, 0, sizeof(s_button_states));
@@ -158,32 +188,37 @@ void board_key_init(void) {
         ESP_LOGI(BOARD_TAG, "Button %d initial state: %s", i, raw_state ? "pressed" : "released");
     }
     
+    // 创建并启动定时器
+    const esp_timer_create_args_t timer_args = {
+        .callback = &key_timer_cb,
+        .name = "key_scan_timer"
+    };
+    ret = esp_timer_create(&timer_args, &s_key_timer);
+    if (ret != ESP_OK) {
+        ESP_LOGE(BOARD_TAG, "Failed to create key timer");
+        return;
+    }
+    
+    ret = esp_timer_start_periodic(s_key_timer, KEY_SCAN_INTERVAL_US);
+    if (ret != ESP_OK) {
+        ESP_LOGE(BOARD_TAG, "Failed to start key timer");
+        return;
+    }
+    
     s_keys_initialized = true;
-    ESP_LOGI(BOARD_TAG, "Keys initialized successfully");
+    ESP_LOGI(BOARD_TAG, "Keys initialized successfully (Queue + Timer)");
 }
 
 /* ================== 输入接口实现 ================== */
 board_key_t board_key_poll(void) {
-    if (!s_keys_initialized) {
+    if (!s_keys_initialized || s_key_queue == NULL) {
         return BOARD_KEY_NONE;
     }
 
-    // 轮询所有按键，返回第一个检测到的事件
-    for (int i = 0; i < BUTTON_COUNT; i++) {
-        key_event_type_t event = button_process(i);
-        
-        // 只返回短按和长按事件，重复事件用于特殊处理
-        if (event == KEY_EVENT_SHORT_PRESS || event == KEY_EVENT_LONG_PRESS) {
-            static const board_key_t key_map[BUTTON_COUNT] = {
-                BOARD_KEY_UP,
-                BOARD_KEY_DOWN,
-                BOARD_KEY_ENTER,
-                BOARD_KEY_BACK
-            };
-            
-            ESP_LOGD(BOARD_TAG, "Key %d detected (event=%d)", i, event);
-            return key_map[i];
-        }
+    board_key_t key = BOARD_KEY_NONE;
+    // 非阻塞接收
+    if (xQueueReceive(s_key_queue, &key, 0) == pdTRUE) {
+        return key;
     }
     return BOARD_KEY_NONE;
 }

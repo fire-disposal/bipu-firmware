@@ -1,9 +1,7 @@
 #include "app.h"
 #include "app_battery.h"
-#include "app_conn_sm.h"
 #include "app_ble.h"
 #include "board.h"
-#include "board_hal.h"
 #include "ble_manager.h"
 #include "ui.h"
 #include "esp_log.h"
@@ -38,16 +36,31 @@ static int s_marquee_index = 0; // 当前点亮的 LED 索引 (0-2)
 static int s_blink_count = 0;   // 已闪烁次数
 
 /* ===================== GUI 任务 ===================== */
+// 事件通知句柄，用于唤醒 GUI 任务 (已在上方定义)
+// static TaskHandle_t s_gui_task_handle = NULL;
+
+static void ui_redraw_callback(void) {
+    if (s_gui_task_handle != NULL) {
+        xTaskNotifyGive(s_gui_task_handle);
+    }
+}
+
 static void gui_task(void* pvParameters)
 {
     (void)pvParameters;
-    ESP_LOGI(APP_TAG, "GUI 任务已启动 (周期：%d ms)", GUI_TASK_PERIOD_MS);
+    ESP_LOGI(APP_TAG, "GUI 任务已启动 (事件驱动模式)");
 
-    TickType_t last_wake_time = xTaskGetTickCount();
+    // 注册重绘回调
+    ui_set_redraw_callback(ui_redraw_callback);
+
+    // 初始渲染一次，获取首次休眠时间
+    uint32_t sleep_ms = ui_tick();
 
     for (;;) {
-        ui_tick();
-        vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(GUI_TASK_PERIOD_MS));
+        // 等待重绘信号，最大等待时间由 ui_tick 返回值决定
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(sleep_ms));
+        
+        sleep_ms = ui_tick();
     }
 }
 
@@ -76,7 +89,10 @@ esp_err_t app_init(void)
     // 2. UI 初始化
     ui_init();
 
-    // 3. 创建 GUI 任务（双核芯片绑 Core 1 避让 BLE，单核芯片绑 Core 0）
+    // 3. 电池监控初始化（后台定时器）
+    app_battery_init();
+
+    // 4. 创建 GUI 任务（双核芯片绑 Core 1 避让 BLE，单核芯片绑 Core 0）
     BaseType_t gui_ret = xTaskCreatePinnedToCore(
         gui_task,
         "gui_task",
@@ -183,8 +199,11 @@ void app_loop(void)
 
     // 2. 震动马达状态更新：始终高频（定时器精度需要）
     board_vibrate_tick();
+    
+    // 3. LED 状态机轮询：高频调用以保证动画流畅
+    board_leds_tick();
 
-    // 3. 以下非关键路径每 200ms 执行一次（5Hz）
+    // 4. 以下非关键路径每 200ms 执行一次（5Hz）
     static uint32_t s_slow_tick_time = 0;
     uint32_t now = board_time_ms();
     if (now - s_slow_tick_time >= 200) {
@@ -193,17 +212,11 @@ void app_loop(void)
         // BLE 事件处理（NimBLE 事件驱动，此函数仅做轻量检查）
         ble_manager_poll();
 
-        // LED 状态机轮询
-        board_leds_tick();
-
-        // LED 状态指示（广播跑马灯，连接闪烁）
+        // LED 状态指示（广播跑马灯，连接闪烁，仅更新状态）
         app_led_tick();
 
-        // 连接状态机
-        app_conn_sm_tick(ble_manager_is_connected());
-
-        // 电池状态更新（内部已有 10s 节流）
-        app_battery_tick();
+        // 电池状态更新（已移至后台定时器）
+        // app_battery_tick();
     }
 }
 

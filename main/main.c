@@ -8,6 +8,8 @@
 #include "ui.h"
 #include "ui_render.h"
 #include "soc/rtc.h"
+#include "nvs_flash.h"
+#include "app.h"
 
 
 static const char *MAIN_TAG = "MAIN_BOOT";
@@ -16,8 +18,13 @@ static const char *MAIN_TAG = "MAIN_BOOT";
 
 #define STARTUP_RESTART_DELAY_MS (2000)
 
+// 应用主任务配置
+#define APP_TASK_NAME        "app_task"
+#define APP_TASK_STACK_SIZE  (4096)
+#define APP_TASK_PRIORITY    (4)
+#define APP_TASK_PERIOD_MS   (10)
+
 /* ======================== 任务句柄 ======================== */
-static TaskHandle_t s_gui_task_handle = NULL;
 static TaskHandle_t s_app_task_handle = NULL;
 
 /* ===================== 应用主任务 ===================== */
@@ -62,19 +69,21 @@ static esp_err_t init_nvs(void)
 /* ======================== 主入口 ======================== */
 
 void app_main(void) {
-  // 1. 【视觉优先】—— 剥离非核心初始化
-  ESP_LOGI(MAIN_TAG, "Initializing I2C...");
-  if (board_i2c_init() != ESP_OK) {
-    ESP_LOGE(MAIN_TAG, "I2C initialization failed");
-    // 继续启动，后续对 I2C 的调用需自行检查句柄
-  }
-  vTaskDelay(pdMS_TO_TICKS(500));
-  ESP_LOGI(MAIN_TAG, "Initializing Display...");
-  board_display_init(); 
-  vTaskDelay(pdMS_TO_TICKS(500));
-  ESP_LOGI(MAIN_TAG, "Initializing UI...");
-  ui_init();
-  vTaskDelay(pdMS_TO_TICKS(500));
+    esp_err_t err = ESP_OK;
+
+    // 1. 【视觉优先】—— 剥离非核心初始化
+    ESP_LOGI(MAIN_TAG, "Initializing I2C...");
+    if (board_i2c_init() != ESP_OK) {
+        ESP_LOGE(MAIN_TAG, "I2C initialization failed");
+        // 继续启动，后续对 I2C 的调用需自行检查句柄
+    }
+    vTaskDelay(pdMS_TO_TICKS(500));
+    ESP_LOGI(MAIN_TAG, "Initializing Display...");
+    board_display_init(); 
+    vTaskDelay(pdMS_TO_TICKS(500));
+    ESP_LOGI(MAIN_TAG, "Initializing UI...");
+    ui_init();
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     // 步骤 1: NVS
     err = init_nvs();
@@ -127,18 +136,16 @@ void app_main(void) {
         APP_TASK_STACK_SIZE,
         NULL,
         APP_TASK_PRIORITY,
-        NULL,
+        &s_app_task_handle,
         BOARD_APP_CPU
     );
+
+    if (xReturned != pdPASS) {
+        ESP_LOGE(MAIN_TAG, "应用任务创建失败");
+    }
 
   // 6. 【电源稳压】在启动蓝牙大魔王前，给系统一个缓冲期
   // 此时屏幕和逻辑任务已稳定运行，电流平稳
   vTaskDelay(pdMS_TO_TICKS(500));
+}
 
-  // 7. 【高能耗动作】分步初始化电池管理和蓝牙
-  ESP_LOGI(MAIN_TAG, "Initializing Battery Manager...");
-  board_battery_manager_init();
-
-  vTaskDelay(pdMS_TO_TICKS(500));
-
-/* GUI task moved into app component (app.c) */

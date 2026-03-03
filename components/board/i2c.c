@@ -28,30 +28,3 @@ esp_err_t board_i2c_init(void) {
     return ESP_OK;
 }
 
-// Chunked transmit helper: send `len` bytes in `chunk_size` pieces with up to 3 attempts per chunk.
-esp_err_t board_i2c_transmit_chunked(i2c_master_dev_handle_t dev, const uint8_t *data, size_t len, size_t chunk_size, TickType_t timeout)
-{
-    if (dev == NULL || data == NULL || len == 0) return ESP_ERR_INVALID_ARG;
-    size_t off = 0;
-    while (off < len) {
-        size_t chunk = (len - off) > chunk_size ? chunk_size : (len - off);
-        esp_err_t tret = ESP_FAIL;
-        for (int attempt = 0; attempt < 3; attempt++) {
-            tret = i2c_master_transmit(dev, &data[off], chunk, timeout);
-            if (tret == ESP_OK) break;
-            ESP_LOGD(BOARD_TAG, "i2c chunk attempt %d failed: %s (%d) addr=0x%02x off=%zu chunk=%zu",
-                     attempt + 1, esp_err_to_name(tret), tret, BOARD_OLED_I2C_ADDRESS, off, chunk);
-            /* 避免长期阻塞：使用短微秒延迟替代毫秒级 vTaskDelay，以减少整体传输延迟
-               原先的 5ms 在高频刷新场景下会显著拉慢帧率；此处使用 200us 的短延时
-               以便让总线恢复同时不引入太大开销。 */
-            ets_delay_us(200);
-        }
-        if (tret != ESP_OK) {
-            ESP_LOGW(BOARD_TAG, "i2c chunk failed after retries: %s (%d) addr=0x%02x off=%zu chunk=%zu",
-                     esp_err_to_name(tret), tret, BOARD_OLED_I2C_ADDRESS, off, chunk);
-            return tret;
-        }
-        off += chunk;
-    }
-    return ESP_OK;
-}

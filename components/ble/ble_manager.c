@@ -82,7 +82,6 @@ static ble_time_sync_callback_t s_time_sync_callback = NULL;
 static ble_connection_callback_t s_connection_callback = NULL;
 
 /** NUS 服务句柄 */
-static uint16_t s_nus_service_handle;
 static uint16_t s_nus_tx_char_handle;
 static uint16_t s_nus_rx_char_handle;
 

@@ -120,21 +120,25 @@ void board_display_init(void) {
     }
 
     // 显示屏硬件复位序列 - 排空SSD1309内部电荷泵的残留电位
-    ESP_LOGI(BOARD_TAG, "Performing display hardware reset...");
-    
-    // 配置复位引脚为输出
-    gpio_reset_pin(BOARD_GPIO_DISPLAY_RESET);
-    gpio_set_direction(BOARD_GPIO_DISPLAY_RESET, GPIO_MODE_OUTPUT);
-    
-    // 拉低复位引脚100ms
-    gpio_set_level(BOARD_GPIO_DISPLAY_RESET, 0);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
-    // 拉高复位引脚，完成复位
-    gpio_set_level(BOARD_GPIO_DISPLAY_RESET, 1);
-    vTaskDelay(pdMS_TO_TICKS(10)); // 短暂延时确保复位完成
-    
-    ESP_LOGI(BOARD_TAG, "Display hardware reset completed");
+    if (BOARD_GPIO_DISPLAY_RESET != GPIO_NUM_NC) {
+        ESP_LOGI(BOARD_TAG, "Performing display hardware reset...");
+        
+        // 配置复位引脚为输出
+        gpio_reset_pin(BOARD_GPIO_DISPLAY_RESET);
+        gpio_set_direction(BOARD_GPIO_DISPLAY_RESET, GPIO_MODE_OUTPUT);
+        
+        // 拉低复位引脚100ms
+        gpio_set_level(BOARD_GPIO_DISPLAY_RESET, 0);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        
+        // 拉高复位引脚，完成复位
+        gpio_set_level(BOARD_GPIO_DISPLAY_RESET, 1);
+        vTaskDelay(pdMS_TO_TICKS(10)); // 短暂延时确保复位完成
+        
+        ESP_LOGI(BOARD_TAG, "Display hardware reset completed");
+    } else {
+        ESP_LOGI(BOARD_TAG, "No display reset pin defined, skipping hardware reset");
+    }
 
     // 创建显示互斥锁
     s_display_mutex = xSemaphoreCreateMutex();

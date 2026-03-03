@@ -23,9 +23,21 @@ typedef enum {
 /* ================== UI 核心接口 ================== */
 
 void ui_init(void);
-void ui_tick(void);
+uint32_t ui_tick(void); // 返回下一次 tick 的等待时间 (ms)
 void ui_on_key(board_key_t key);
 void ui_change_page(ui_state_enum_t new_state);
+
+/**
+ * @brief 请求重绘 UI
+ * 当 UI 状态发生变化需要刷新屏幕时调用
+ */
+void ui_request_redraw(void);
+
+/**
+ * @brief 设置重绘回调函数
+ * @param cb 回调函数，通常用于唤醒 GUI 任务
+ */
+void ui_set_redraw_callback(void (*cb)(void));
 
 /* ================== 消息数据接口 ================== */
 int ui_get_message_count(void);

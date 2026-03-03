@@ -62,10 +62,6 @@ static uint32_t s_last_adc_sample_time = 0;
 static bool s_voltage_out_of_range = false; // 上次是否处于异常范围（仅状态变化时打日志）
 
 // 电池管理状态（从 board_battery.c 合并）
-static uint32_t s_battery_last_update = 0;
-static uint32_t s_battery_last_log = 0;
-static bool s_low_voltage_mode = false;
-static uint32_t s_battery_current_interval = BATTERY_UPDATE_INTERVAL_USB_MS;
 
 /**
  * @brief ADC 校准初始化
@@ -325,88 +321,12 @@ void board_system_restart(void)
 
 void board_battery_manager_init(void)
 {
-    ESP_LOGI(BOARD_TAG, "电池管理初始化");
-    s_battery_last_update = board_time_ms();
-    s_battery_last_log = s_battery_last_update;
-    s_low_voltage_mode = false;
-    s_battery_current_interval = BATTERY_UPDATE_INTERVAL_USB_MS;
+    // Deprecated
 }
 
 void board_battery_manager_tick(void)
 {
-    uint32_t now = board_time_ms();
-    
-    // 使用固定的采样间隔，不再根据供电方式切换
-    
-    // 检查是否需要更新
-    if (now - s_battery_last_update < s_battery_current_interval) {
-        return;
-    }
-    s_battery_last_update = now;
-    
-    // 获取电池状态
-    uint8_t battery_level = board_battery_percent();
-    float battery_voltage = board_battery_voltage();
-    bool is_charging = board_battery_is_charging();
-    
-    // 低电压保护
-    if (battery_voltage < BATTERY_CRITICAL_VOLTAGE_THRESHOLD && !is_charging) {
-        // 严重低电压：关闭屏幕或大幅降低亮度
-        board_display_set_contrast(10);  // 最低对比度/亮度
-        s_low_voltage_mode = true;
-        ESP_LOGW(BOARD_TAG, "严重低电压模式：%.2fV", battery_voltage);
-    } else if (battery_voltage < BATTERY_LOW_VOLTAGE_THRESHOLD && !is_charging) {
-        // 低电压：降低亮度
-        if (!s_low_voltage_mode) {
-            board_display_set_contrast(50);  // 中等对比度/亮度
-            s_low_voltage_mode = true;
-            ESP_LOGW(BOARD_TAG, "低电压模式：%.2fV", battery_voltage);
-        }
-    } else {
-        // 电压正常：恢复正常亮度
-        if (s_low_voltage_mode) {
-            board_display_set_contrast(100);  // 恢复默认对比度/亮度
-            s_low_voltage_mode = false;
-            ESP_LOGI(BOARD_TAG, "电压恢复正常：%.2fV", battery_voltage);
-        }
-    }
-    
-    // 定期打印日志（避免过多日志）
-    if (now - s_battery_last_log >= BATTERY_LOG_INTERVAL_MS) {
-        s_battery_last_log = now;
-        ESP_LOGI(BOARD_TAG, "电池: %.2fV, %d%%, %s",
-                 battery_voltage, battery_level,
-                 is_charging ? "充电中" : "未充电");
-    }
+    // Deprecated
 }
 
-uint8_t board_battery_manager_get_percent(void)
-{
-    return board_battery_percent();
-}
-
-float board_battery_manager_get_voltage(void)
-{
-    return board_battery_voltage();
-}
-
-bool board_battery_manager_is_charging(void)
-{
-    return board_battery_is_charging();
-}
-
-bool board_battery_manager_is_low_voltage_mode(void)
-{
-    return s_low_voltage_mode;
-}
-
-/**
- * @brief 获取电池管理的更新间隔（用于节能管理）
- * @param is_usb_power 当前供电方式
- * @return 推荐的检测间隔（毫秒）
- */
-uint32_t board_battery_manager_get_update_interval(bool is_usb_power)
-{
-    (void)is_usb_power;
-    return BATTERY_UPDATE_INTERVAL_USB_MS;
-}
+// Deprecated accessors
