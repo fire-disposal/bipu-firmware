@@ -3,5 +3,5 @@ idf_component_register(
          "src/app_battery.c"
          "src/app_ble.c"
     INCLUDE_DIRS "include"
-    PRIV_REQUIRES ble board ui
+    PRIV_REQUIRES ble board ui esp_timer
 )

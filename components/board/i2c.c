@@ -7,6 +7,11 @@
 #include "rom/ets_sys.h"
 
 esp_err_t board_i2c_init(void) {
+    // 重入保护：若总线已初始化则直接返回，防止 main.c 早期调用与 board_init() 内部调用产生句柄泄漏
+    if (board_i2c_bus_handle != NULL) {
+        return ESP_OK;
+    }
+
     i2c_master_bus_config_t i2c_mst_config = {
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .i2c_port = I2C_NUM_0,

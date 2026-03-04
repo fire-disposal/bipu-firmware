@@ -14,8 +14,6 @@
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "host/util/util.h"
-#include "nimble/nimble_port.h"
-#include "nimble/nimble_port_freertos.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
@@ -57,8 +55,8 @@ static bool check_binding_match(void);
 #define DEVICE_NAME_PREFIX     "Bipupu_"
 
 /** 广播参数 */
-#define ADV_INTERVAL_MIN_MS    100
-#define ADV_INTERVAL_MAX_MS    200
+#define ADV_INTERVAL_MIN_MS    500     /**< 最小广播间隔，对孕呼机设备无需短间隔 */
+#define ADV_INTERVAL_MAX_MS    1000   /**< 最大广播间隔 */
 #define ADV_DURATION_SEC       0       /**< 0 = 永久广播 */
 
 /* ================== 私有状态变量 ================== */

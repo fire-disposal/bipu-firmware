@@ -3,7 +3,6 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_log.h"
-#include "ui_types.h"
 #include <string.h>
 
 static const char* TAG = "storage";
@@ -24,33 +23,28 @@ esp_err_t storage_init(void) {
     return ESP_OK;
 }
 
-esp_err_t storage_save_messages(const ui_message_t* msgs, int count, int current_idx) {
+/**
+ * @brief 将消息数组以 blob 方式序列化存储
+ *
+ * 旧格式使用每条消息4个独立 key（m0_s/m0_t/m0_ts/m0_r × 10条 = 40+个key），
+ * 新格式使用3个key（msg_count + cur_idx + msgs_data blob），
+ * 大幅减少 NVS 写入次数，降低 Flash 磨损。
+ */
+esp_err_t storage_save_messages(const storage_message_t* msgs, int count, int current_idx) {
+    if (!msgs || count < 0 || count > MAX_MESSAGES) return ESP_ERR_INVALID_ARG;
+
     nvs_handle_t h;
     esp_err_t err = nvs_open(NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) return err;
 
     err = nvs_set_i32(h, "msg_count", count);
     if (err != ESP_OK) goto _close;
-    err = nvs_set_i32(h, "current_idx", current_idx);
+
+    err = nvs_set_i32(h, "cur_idx", current_idx);
     if (err != ESP_OK) goto _close;
 
-    for (int i = 0; i < count && i < MAX_MESSAGES; i++) {
-        char key[32];
-        // sender
-        snprintf(key, sizeof(key), "m%d_s", i);
-        err = nvs_set_str(h, key, msgs[i].sender);
-        if (err != ESP_OK) goto _close;
-        // text
-        snprintf(key, sizeof(key), "m%d_t", i);
-        err = nvs_set_str(h, key, msgs[i].text);
-        if (err != ESP_OK) goto _close;
-        // timestamp
-        snprintf(key, sizeof(key), "m%d_ts", i);
-        err = nvs_set_u32(h, key, msgs[i].timestamp);
-        if (err != ESP_OK) goto _close;
-        // is_read
-        snprintf(key, sizeof(key), "m%d_r", i);
-        err = nvs_set_u8(h, key, msgs[i].is_read ? 1 : 0);
+    if (count > 0) {
+        err = nvs_set_blob(h, "msgs_data", msgs, sizeof(storage_message_t) * (size_t)count);
         if (err != ESP_OK) goto _close;
     }
 
@@ -58,74 +52,58 @@ esp_err_t storage_save_messages(const ui_message_t* msgs, int count, int current
 
 _close:
     nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "storage_save_messages failed: %s", esp_err_to_name(err));
+    }
     return err;
 }
 
-esp_err_t storage_load_messages(ui_message_t* msgs, int* out_count, int* out_current_idx) {
+esp_err_t storage_load_messages(storage_message_t* msgs, int* out_count, int* out_current_idx) {
+    if (!msgs || !out_count || !out_current_idx) return ESP_ERR_INVALID_ARG;
+
+    *out_count = 0;
+    *out_current_idx = 0;
+
     nvs_handle_t h;
     esp_err_t err = nvs_open(NAMESPACE, NVS_READONLY, &h);
     if (err != ESP_OK) {
-        // If no NVS namespace yet, treat as empty
-        if (err == ESP_ERR_NVS_NOT_FOUND) {
-            *out_count = 0;
-            *out_current_idx = 0;
-            return ESP_OK;
-        }
+        // 命名空间不存在视为空存储，属于正常情况
+        if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
         return err;
     }
 
     int32_t msg_count = 0;
     int32_t cur_idx = 0;
-    err = nvs_get_i32(h, "msg_count", &msg_count);
-    if (err != ESP_OK) {
+    nvs_get_i32(h, "msg_count", &msg_count);
+    nvs_get_i32(h, "cur_idx", &cur_idx);
+
+    // 边界校验
+    if (msg_count < 0 || msg_count > MAX_MESSAGES) {
+        ESP_LOGW(TAG, "Invalid msg_count=%ld in NVS, resetting to 0", msg_count);
         msg_count = 0;
     }
-    err = nvs_get_i32(h, "current_idx", &cur_idx);
-    if (err != ESP_OK) {
+    if (cur_idx < 0 || (msg_count > 0 && cur_idx >= msg_count)) {
         cur_idx = 0;
     }
 
-    int load_count = msg_count;
-    if (load_count > MAX_MESSAGES) load_count = MAX_MESSAGES;
-    for (int i = 0; i < load_count; i++) {
-        char key[32];
-        size_t required = 0;
-        // sender
-        snprintf(key, sizeof(key), "m%d_s", i);
-        err = nvs_get_str(h, key, NULL, &required);
-        if (err == ESP_OK && required > 0) {
-            if (required > sizeof(msgs[i].sender)) required = sizeof(msgs[i].sender);
-            nvs_get_str(h, key, msgs[i].sender, &required);
-        } else {
-            msgs[i].sender[0] = '\0';
+    if (msg_count > 0) {
+        size_t sz = sizeof(storage_message_t) * (size_t)msg_count;
+        err = nvs_get_blob(h, "msgs_data", msgs, &sz);
+        if (err != ESP_OK) {
+            // blob 读取失败（可能是从旧格式升级），丢弃历史消息，从零开始
+            ESP_LOGW(TAG, "msgs_data blob read failed (%s), discarding old messages",
+                     esp_err_to_name(err));
+            msg_count = 0;
+            cur_idx = 0;
+            err = ESP_OK; // 非致命错误
         }
-        // text
-        snprintf(key, sizeof(key), "m%d_t", i);
-        required = 0;
-        err = nvs_get_str(h, key, NULL, &required);
-        if (err == ESP_OK && required > 0) {
-            if (required > sizeof(msgs[i].text)) required = sizeof(msgs[i].text);
-            nvs_get_str(h, key, msgs[i].text, &required);
-        } else {
-            msgs[i].text[0] = '\0';
-        }
-        // timestamp
-        snprintf(key, sizeof(key), "m%d_ts", i);
-        uint32_t ts = 0;
-        if (nvs_get_u32(h, key, &ts) == ESP_OK) msgs[i].timestamp = ts;
-        else msgs[i].timestamp = 0;
-        // is_read
-        snprintf(key, sizeof(key), "m%d_r", i);
-        uint8_t r = 0;
-        if (nvs_get_u8(h, key, &r) == ESP_OK) msgs[i].is_read = (r != 0);
-        else msgs[i].is_read = false;
     }
 
-    *out_count = load_count;
-    *out_current_idx = cur_idx;
+    *out_count = (int)msg_count;
+    *out_current_idx = (int)cur_idx;
 
     nvs_close(h);
-    return ESP_OK;
+    return err;
 }
 
 esp_err_t storage_save_ble_addr(const char* addr) {
@@ -167,16 +145,17 @@ esp_err_t storage_load_brightness(uint8_t* out_brightness) {
     esp_err_t err = nvs_open(NAMESPACE, NVS_READONLY, &h);
     if (err != ESP_OK) {
         if (err == ESP_ERR_NVS_NOT_FOUND) {
-            *out_brightness = 100; // 默认亮度
+            *out_brightness = 100;
             return ESP_OK;
         }
         return err;
     }
     err = nvs_get_u8(h, "brightness", out_brightness);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
-        *out_brightness = 100; // 默认亮度
+        *out_brightness = 100;
         err = ESP_OK;
     }
     nvs_close(h);
     return err;
 }
+

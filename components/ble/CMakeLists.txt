@@ -13,4 +13,5 @@ idf_component_register(
         esp_timer
     PRIV_REQUIRES
         nvs_flash
+        board
 )

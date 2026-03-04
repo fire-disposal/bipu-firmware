@@ -1,6 +1,7 @@
-# Name,   Type, SubType, Offset,  Size, Flags
-nvs,      data, nvs,     ,        0x4000,
+﻿# Name,   Type, SubType, Offset,  Size, Flags
+# NVS 分区扩大至 0x8000（原 0x4000），为 blob 消息存储提供更多空间
+# spiffs 分区已删除：项目所有持久化均通过 NVS，文件系统分区浪费 1MB Flash
+nvs,      data, nvs,     ,        0x8000,
 otadata,  data, ota,     ,        0x2000,
 phy_init, data, phy,     ,        0x1000,
 factory,  app,  factory, ,        0x200000,
-storage,  data, spiffs,  ,        0x100000,

@@ -1,13 +1,8 @@
-#include "ble_manager.h"
 #include "board.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "storage.h"
-#include "ui.h"
-#include "ui_render.h"
-#include "soc/rtc.h"
 #include "nvs_flash.h"
 #include "app.h"
 
@@ -71,21 +66,23 @@ static esp_err_t init_nvs(void)
 void app_main(void) {
     esp_err_t err = ESP_OK;
 
-    // 1. 【视觉优先】—— 剥离非核心初始化
+    // ═══════════════════════════════════════════════════
+    // 阶段1 【视觉优先】早期显示初始化
+    // 仅启动 I2C 总线 + 显示屏，让用户尽快看到屏幕
+    // ═══════════════════════════════════════════════════
     ESP_LOGI(MAIN_TAG, "Initializing I2C...");
     if (board_i2c_init() != ESP_OK) {
         ESP_LOGE(MAIN_TAG, "I2C initialization failed");
-        // 继续启动，后续对 I2C 的调用需自行检查句柄
     }
-    vTaskDelay(pdMS_TO_TICKS(500));
-    ESP_LOGI(MAIN_TAG, "Initializing Display...");
-    board_display_init(); 
-    vTaskDelay(pdMS_TO_TICKS(500));
-    ESP_LOGI(MAIN_TAG, "Initializing UI...");
-    ui_init();
-    vTaskDelay(pdMS_TO_TICKS(500));
+    // I2C 总线上电稳定约 5ms，无需 500ms
+    vTaskDelay(pdMS_TO_TICKS(10));
 
-    // 步骤 1: NVS
+    ESP_LOGI(MAIN_TAG, "Initializing Display...");
+    board_display_init(); // 内部含 100ms 硬件复位序列，无需额外延时
+
+    // ═══════════════════════════════════════════════════
+    // 阶段2 NVS 初始化（app_init/ui_init 需要）
+    // ═══════════════════════════════════════════════════
     err = init_nvs();
     if (err != ESP_OK) {
         ESP_LOGE(MAIN_TAG, "NVS 初始化失败：%s", esp_err_to_name(err));
@@ -94,7 +91,10 @@ void app_main(void) {
         return;
     }
 
-    // 步骤 2: 硬件初始化（board_init），尝试一次，如果失败则重试一次
+    // ═══════════════════════════════════════════════════
+    // 阶段3 完整硬件初始化
+    // board_init 内部会跳过已初始化的 I2C 和 Display（重入保护）
+    // ═══════════════════════════════════════════════════
     err = board_init();
     if (err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "board_init 失败：%s，重试一次...", esp_err_to_name(err));
@@ -109,7 +109,9 @@ void app_main(void) {
     }
     ESP_LOGI(MAIN_TAG, "硬件初始化成功");
 
-    // 步骤 3: 应用层初始化（可降级：若 BLE 初始化失败，可继续运行但禁用相关功能）
+    // ═══════════════════════════════════════════════════
+    // 阶段4 应用层初始化（含 ui_init + ble_init，仅调用一次）
+    // ═══════════════════════════════════════════════════
     err = app_init();
     if (err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "应用初始化遇到问题：%s，继续启动但部分功能可能不可用", esp_err_to_name(err));
@@ -117,19 +119,22 @@ void app_main(void) {
         ESP_LOGI(MAIN_TAG, "应用层初始化成功");
     }
 
-    // 步骤 3.1: 系统就绪，短震动一次以提示用户（在蓝牙广播前完成）
+    // 系统就绪，短震动提示用户
     ESP_LOGI(MAIN_TAG, "系统就绪，执行开机短震动");
     board_vibrate_short();
-    // 等待震动结束以保证用户能感知（阻塞短时间，通常 <= 1s）
     vTaskDelay(pdMS_TO_TICKS(200));
 
-    // 步骤 3.2: 启动应用级服务（由 app 组件负责启动 BLE 等）
+    // ═══════════════════════════════════════════════════
+    // 阶段5 启动 BLE 广播等后台服务
+    // ═══════════════════════════════════════════════════
     esp_err_t srv_ret = app_start_services();
     if (srv_ret != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "app_start_services returned %s", esp_err_to_name(srv_ret));
     }
 
-    // 步骤 4: 创建应用主任务（双核芯片绑 Core 1 避让 BLE，单核芯片绑 Core 0）
+    // ═══════════════════════════════════════════════════
+    // 阶段6 创建应用主任务（双核绑 Core 1 避让 BLE，单核绑 Core 0）
+    // ═══════════════════════════════════════════════════
     BaseType_t xReturned = xTaskCreatePinnedToCore(
         app_task,
         APP_TASK_NAME,
@@ -143,9 +148,5 @@ void app_main(void) {
     if (xReturned != pdPASS) {
         ESP_LOGE(MAIN_TAG, "应用任务创建失败");
     }
-
-  // 6. 【电源稳压】在启动蓝牙大魔王前，给系统一个缓冲期
-  // 此时屏幕和逻辑任务已稳定运行，电流平稳
-  vTaskDelay(pdMS_TO_TICKS(500));
 }
 

@@ -1,6 +1,5 @@
-#include "board.h"  // I2C总线句柄
 #include "board_pins.h"      // I2C配置常量
-#include "board.h"           // 公共接口（包含节能管理）
+#include "board.h"           // 公共接口（包含 I2C 总线句柄）
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -47,12 +46,12 @@ static uint8_t u8g2_esp32_i2c_byte_cb(u8x8_t *u8x8, uint8_t msg,
         
         // 检查缓冲区是否有足够空间
         if (buf_idx + arg_int > I2C_TX_BUFFER_SIZE) {
-            ESP_LOGE(BOARD_TAG, "I2C buffer overflow: buf_idx=%zu, arg_int=%u, buffer_size=%d", 
+            ESP_LOGE(BOARD_TAG, "I2C buffer overflow: buf_idx=%zu, arg_int=%u, buffer_size=%d",
                      buf_idx, arg_int, I2C_TX_BUFFER_SIZE);
-            // 尝试重置缓冲区并继续
-            buf_idx = 0;
+            // 缓冲区不足：直接返回错误，不能继续写入（继续写会破坏已缓冲的帧数据）
+            return 0;
         }
-        
+
         // 将数据复制到缓冲区
         memcpy(&buffer[buf_idx], data, arg_int);
         buf_idx += arg_int;

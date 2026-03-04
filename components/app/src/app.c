@@ -6,6 +6,7 @@
 #include "ui.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -28,8 +29,6 @@ static bool s_last_connected = false;
 static bool s_last_advertising = false;
 
 /* ===================== GUI 任务 ===================== */
-// 事件通知句柄，用于唤醒 GUI 任务 (已在上方定义)
-// static TaskHandle_t s_gui_task_handle = NULL;
 
 static void ui_redraw_callback(void) {
     if (s_gui_task_handle != NULL) {
@@ -49,10 +48,19 @@ static void gui_task(void* pvParameters)
     uint32_t sleep_ms = ui_tick();
 
     for (;;) {
-        // 等待重绘信号，最大等待时间由 ui_tick 返回值决定
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(sleep_ms));
-
         sleep_ms = ui_tick();
+
+#ifdef CONFIG_LOG_DEFAULT_LEVEL_DEBUG
+        // 栈监控：每 30 秒打印一次副高水位标记（仅 DEBUG 构建）
+        static uint32_t s_stack_check_time = 0;
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (now_ms - s_stack_check_time >= 30000U) {
+            s_stack_check_time = now_ms;
+            ESP_LOGD(APP_TAG, "[Stack] gui_task high water: %u words",
+                     uxTaskGetStackHighWaterMark(NULL));
+        }
+#endif
     }
 }
 
@@ -78,6 +86,8 @@ esp_err_t app_init(void)
     }
 
     // 2. UI 初始化
+    // 注意：ui_init 内部调用 storage_init + 加载持久化消息，必须在 NVS 初始化之后调用。
+    // main.c 不再单独调用 ui_init，统一在此处调用一次。
     ui_init();
 
     // 3. 电池监控初始化（后台定时器）
@@ -150,6 +160,15 @@ void app_loop(void)
         // BLE 状态日志记录
         update_ble_state_logging();
 
+#ifdef CONFIG_LOG_DEFAULT_LEVEL_DEBUG
+        // 栈高水位监控：不影响量产，只在 DEBUG 构建时启用
+        static uint32_t s_stack_warn_time = 0;
+        if (now - s_stack_warn_time >= 30000U) {
+            s_stack_warn_time = now;
+            ESP_LOGD(APP_TAG, "[Stack] app_task high water: %u words",
+                     uxTaskGetStackHighWaterMark(NULL));
+        }
+#endif
     }
 }
 
