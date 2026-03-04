@@ -38,8 +38,7 @@
 #define BATTERY_UPDATE_INTERVAL_USB_MS    5000U   // USB供电时5秒更新一次
 #define BATTERY_UPDATE_INTERVAL_BATTERY_MS 15000U // 电池供电时15秒更新一次（节省功耗）
 #define BATTERY_LOG_INTERVAL_MS           30000U // 30秒打印一次日志
-#define BATTERY_LOW_VOLTAGE_THRESHOLD     3.0f   // 低电压阈值
-#define BATTERY_CRITICAL_VOLTAGE_THRESHOLD 2.8f  // 严重低电压阈值
+#define BATTERY_LOW_VOLTAGE_THRESHOLD     3.3f   // 低电压阈值（单级保护）
 
 // 全局句柄
 static adc_oneshot_unit_handle_t s_adc1_handle = NULL;
@@ -47,6 +46,12 @@ static adc_cali_handle_t s_adc_cali_handle = NULL;
 static bool s_do_calibration = false;
 static adc_channel_t s_adc_channel;
 static bool s_power_initialized = false;
+
+// 低电压保护状态
+static bool s_low_voltage_mode = false;
+static void (*s_low_voltage_callback)(float voltage, bool is_charging) = NULL;
+static bool s_auto_protection_enabled = false;
+static uint32_t s_last_protection_check = 0;
 
 // 充电检测相关变量
 static float s_smoothed_voltage = 0.0f;
@@ -147,7 +152,7 @@ void board_power_init(void) {
     // 打印分压信息以便调试（例如：511k/511k）
     ESP_LOGI(BOARD_TAG, "Voltage divider: Rtop=%.0fR Rbot=%.0fR ratio=%.3f",
              R_DIV_TOP_OHMS, R_DIV_BOTTOM_OHMS, VOLTAGE_DIVIDER_RATIO);
-    
+
     // 5. 初始化充电检测相关变量（使用EMA）
     s_smoothed_voltage = 0.0f;
     s_prev_smoothed_voltage = 0.0f;
@@ -155,7 +160,7 @@ void board_power_init(void) {
     s_is_charging = false;
     s_charging_detect_count = 0;
     s_last_voltage_check_time = 0;
-    
+
     s_power_initialized = true;
     ESP_LOGI(BOARD_TAG, "Power management initialized successfully");
 }
@@ -186,7 +191,7 @@ float board_battery_voltage(void)
         ESP_LOGW(BOARD_TAG, "ADC read failed: %s", esp_err_to_name(ret));
         return s_cached_voltage; // 返回缓存值
     }
-    
+
     if (s_do_calibration && s_adc_cali_handle != NULL) {
         ret = adc_cali_raw_to_voltage(s_adc_cali_handle, adc_raw, &voltage_mv);
         if (ret != ESP_OK) {
@@ -198,7 +203,7 @@ float board_battery_voltage(void)
 
     // 还原分压前的电压 (mV -> V)
     float actual_voltage = (voltage_mv / 1000.0f) * VOLTAGE_DIVIDER_RATIO;
-    
+
     // 安全边界检查（仅在状态变化时打印，避免刷屏）
     bool out_of_range = (actual_voltage < BATTERY_VOLTAGE_MIN || actual_voltage > BATTERY_VOLTAGE_MAX);
     if (out_of_range && !s_voltage_out_of_range) {
@@ -217,7 +222,7 @@ float board_battery_voltage(void)
     // 钳位到安全范围
     if (actual_voltage < BATTERY_VOLTAGE_MIN) actual_voltage = BATTERY_VOLTAGE_MIN;
     if (actual_voltage > BATTERY_VOLTAGE_MAX) actual_voltage = BATTERY_VOLTAGE_MAX;
-    
+
     s_cached_voltage = actual_voltage;
     return actual_voltage;
 }
@@ -232,15 +237,24 @@ uint8_t board_battery_percent(void)
         return s_cached_pct;
     }
     s_last_pct_time = now;
-    
+
     float bat_v = board_battery_voltage();
     float percentage = (bat_v - 3.0f) / (4.2f - 3.0f) * 100.0f;
-    
+
     if (percentage > 100.0f) percentage = 100.0f;
     if (percentage < 0.0f) percentage = 0.0f;
-    
+
     s_cached_pct = (uint8_t)percentage;
     return s_cached_pct;
+}
+
+/* ================== 电池电压检查（供外部调用） ================== */
+float board_power_get_voltage(void) {
+    return board_battery_voltage();
+}
+
+bool board_power_is_low_voltage(void) {
+    return s_low_voltage_mode;
 }
 
 /**
@@ -250,7 +264,7 @@ uint8_t board_battery_percent(void)
 static void power_update_charging_detection(float current_voltage)
 {
     uint32_t current_time = board_time_ms();
-    
+
     // 限制检测频率，避免过于频繁的检测
     if (current_time - s_last_voltage_check_time < BATTERY_CHECK_INTERVAL_MS) {
         return;
@@ -293,26 +307,76 @@ bool board_battery_is_charging(void)
         return s_is_charging; // 返回缓存状态
     }
     s_last_charge_check = now;
-    
+
     float current_voltage = board_battery_voltage();
     power_update_charging_detection(current_voltage);
-    
+
     return s_is_charging;
+}
+
+/* ================== 低电压保护功能 ================== */
+
+void board_power_set_low_voltage_callback(void (*callback)(float voltage, bool is_charging)) {
+    s_low_voltage_callback = callback;
+    ESP_LOGI(BOARD_TAG, "Low voltage callback set");
+}
+
+void board_power_enable_auto_protection(bool enable) {
+    s_auto_protection_enabled = enable;
+    ESP_LOGI(BOARD_TAG, "Auto voltage protection %s", enable ? "enabled" : "disabled");
+}
+
+static void check_voltage_protection(void) {
+    if (!s_auto_protection_enabled) {
+        return;
+    }
+
+    uint32_t now = board_time_ms();
+    if (now - s_last_protection_check < BATTERY_UPDATE_INTERVAL_BATTERY_MS) {
+        return;
+    }
+    s_last_protection_check = now;
+
+    float battery_voltage = board_battery_voltage();
+    bool is_charging = board_battery_is_charging();
+
+    // 单级低电压保护
+    if (battery_voltage < BATTERY_LOW_VOLTAGE_THRESHOLD && !is_charging) {
+        if (!s_low_voltage_mode) {
+            s_low_voltage_mode = true;
+            ESP_LOGW(BOARD_TAG, "Low Battery: %.2fV", battery_voltage);
+            if (s_low_voltage_callback) {
+                s_low_voltage_callback(battery_voltage, is_charging);
+            }
+        }
+    }
+    // 电压恢复
+    else {
+        if (s_low_voltage_mode) {
+            s_low_voltage_mode = false;
+            ESP_LOGI(BOARD_TAG, "Battery Recovered: %.2fV", battery_voltage);
+            // 可以在这里添加恢复回调
+        }
+    }
+}
+
+void board_power_check_voltage(void) {
+    check_voltage_protection();
 }
 
 void board_system_restart(void)
 {
     ESP_LOGI(BOARD_TAG, "System restart requested by user");
-    
+
     // 执行注册的清理回调（由应用层处理）
     board_execute_cleanup();
-    
+
     // 给用户一些反馈 - 短震动提示重启开始
     board_vibrate_short();
-    
+
     // 短暂延迟让用户感知重启动作
     vTaskDelay(pdMS_TO_TICKS(200));
-    
+
     // 执行系统重启
     esp_restart();
 }

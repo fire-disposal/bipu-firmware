@@ -40,6 +40,20 @@ static int s_sm_sub_state = 0;      // 子状态（用于多阶段效果）
 static int s_sm_blink_count = 0;    // 闪烁计数
 static int s_sm_gallop_index = 0;   // 跑马灯索引
 
+// LED 模式状态
+static board_led_mode_t s_led_mode = BOARD_LED_MODE_OFF;
+static uint32_t s_led_mode_last_change = 0;
+static int s_led_mode_sub_state = 0;
+static int s_led_mode_blink_count = 0;
+static int s_led_mode_marquee_index = 0;
+
+// BLE 自动指示器状态
+static bool s_ble_auto_indicator_enabled = false;
+static void (*s_ble_connected_callback)(bool connected) = NULL;
+static void (*s_ble_advertising_callback)(bool advertising) = NULL;
+static bool s_last_ble_connected = false;
+static bool s_last_ble_advertising = false;
+
 /* ================== 内部辅助函数 ================== */
 
 // 安全获取互斥锁
@@ -48,11 +62,16 @@ static inline bool leds_lock(void) {
     return xSemaphoreTake(s_leds_mutex, pdMS_TO_TICKS(100)) == pdTRUE;
 }
 
+// 安全释放互斥锁
 static inline void leds_unlock(void) {
     if (s_leds_mutex != NULL) {
         xSemaphoreGive(s_leds_mutex);
     }
 }
+
+/* ================== LED 模式处理函数声明 ================== */
+static void process_led_mode(void);
+static void update_ble_led_indicator(void);
 
 // 直接设置 GPIO（不经过状态机）
 static void leds_set_raw(board_leds_t leds) {
@@ -298,7 +317,15 @@ void board_leds_gallop_stop(void) {
 
 /* ================== LED 状态机轮询 ================== */
 void board_leds_tick(void) {
-    if (!s_leds_initialized || s_sm_state == LED_SM_IDLE) {
+    if (!s_leds_initialized) {
+        return;
+    }
+    
+    // 处理 LED 模式
+    process_led_mode();
+    
+    // 处理状态机
+    if (s_sm_state == LED_SM_IDLE) {
         return;
     }
 
@@ -384,7 +411,214 @@ void board_leds_tick(void) {
     }
 }
 
+/* ================== BLE-LED 自动指示器 ================== */
+
+void board_leds_enable_ble_auto_indicator(bool enable) {
+    if (!s_leds_initialized) return;
+    
+    s_ble_auto_indicator_enabled = enable;
+    s_last_ble_connected = false;
+    s_last_ble_advertising = false;
+    
+    if (!enable) {
+        // 禁用时恢复默认 LED 模式
+        board_leds_set_mode(BOARD_LED_MODE_OFF);
+    }
+    
+    ESP_LOGD(BOARD_TAG, "BLE auto LED indicator %s", enable ? "enabled" : "disabled");
+}
+
+void board_leds_set_ble_state_callbacks(
+    void (*connected_callback)(bool connected),
+    void (*advertising_callback)(bool advertising)
+) {
+    s_ble_connected_callback = connected_callback;
+    s_ble_advertising_callback = advertising_callback;
+    ESP_LOGD(BOARD_TAG, "BLE state callbacks set");
+}
+
+static void update_ble_led_indicator(void) {
+    if (!s_ble_auto_indicator_enabled) {
+        return;
+    }
+    
+    // 这里需要从外部获取 BLE 状态
+    // 在实际使用中，这些状态应该通过回调函数传递
+    // 暂时留空，由应用层调用 board_leds_set_mode 直接设置
+    
+    // 优先级处理：手电筒优先，不应被常规 LED 状态覆盖
+    if (board_leds_is_flashlight_on()) {
+        return; // UI 已直接控制 LED（手电筒），保持当前状态
+    }
+    if (board_leds_is_active()) {
+        return; // LED 状态机正在运行（如跑马、闪烁等），保持当前状态
+    }
+}
+
+/* ================== LED 模式处理 ================== */
+
+void board_leds_set_mode(board_led_mode_t mode) {
+    if (!s_leds_initialized) return;
+    
+    if (!leds_lock()) return;
+    
+    // 如果新模式与当前模式相同，不做任何操作
+    if (s_led_mode == mode) {
+        xSemaphoreGive(s_leds_mutex);
+        return;
+    }
+    
+    // 停止当前状态机
+    sm_set_idle();
+    
+    // 设置新模式
+    s_led_mode = mode;
+    s_led_mode_last_change = board_time_ms();
+    s_led_mode_sub_state = 0;
+    s_led_mode_blink_count = 0;
+    s_led_mode_marquee_index = 0;
+    
+    // 根据模式设置初始状态
+    switch (mode) {
+        case BOARD_LED_MODE_OFF:
+            leds_set_raw((board_leds_t){0, 0, 0});
+            break;
+        case BOARD_LED_MODE_STATIC:
+            leds_set_raw((board_leds_t){255, 255, 255});
+            break;
+        case BOARD_LED_MODE_ADVERTISING:
+            // 广播跑马灯：从 LED1 开始
+            s_led_mode_marquee_index = 0;
+            board_leds_t adv_leds = {0, 0, 0};
+            adv_leds.led1 = 255;
+            leds_set_raw(adv_leds);
+            break;
+        case BOARD_LED_MODE_CONNECTED:
+            // 连接闪烁：开始第一次闪烁
+            s_led_mode_blink_count = 0;
+            leds_set_raw((board_leds_t){255, 255, 255});
+            break;
+        case BOARD_LED_MODE_MARQUEE:
+            // 通用跑马灯：从 LED1 开始
+            s_led_mode_marquee_index = 0;
+            board_leds_t marquee_leds = {0, 0, 0};
+            marquee_leds.led1 = 255;
+            leds_set_raw(marquee_leds);
+            break;
+        case BOARD_LED_MODE_BLINK:
+            // 通用闪烁：开始闪烁
+            s_led_mode_sub_state = 1; // 亮状态
+            leds_set_raw((board_leds_t){255, 255, 255});
+            break;
+        case BOARD_LED_MODE_NOTIFY_FLASH:
+            // 通知闪烁：快速闪两次
+            s_led_mode_blink_count = 0;
+            leds_set_raw((board_leds_t){255, 255, 255});
+            break;
+        default:
+            leds_set_raw((board_leds_t){0, 0, 0});
+            break;
+    }
+    
+    ESP_LOGD(BOARD_TAG, "LED mode changed to %d", mode);
+    xSemaphoreGive(s_leds_mutex);
+}
+
+static void process_led_mode(void) {
+    // 先处理 BLE 自动指示器
+    update_ble_led_indicator();
+    
+    if (s_led_mode == BOARD_LED_MODE_OFF || s_led_mode == BOARD_LED_MODE_STATIC) {
+        return; // 静态模式无需处理
+    }
+    
+    uint32_t now = board_time_ms();
+    
+    switch (s_led_mode) {
+        case BOARD_LED_MODE_ADVERTISING:
+        case BOARD_LED_MODE_MARQUEE: {
+            // 跑马灯：每 300ms 切换一次 LED
+            if (now - s_led_mode_last_change >= 300) {
+                s_led_mode_last_change = now;
+                s_led_mode_marquee_index = (s_led_mode_marquee_index + 1) % 3;
+                
+                board_leds_t leds = {0, 0, 0};
+                if (s_led_mode_marquee_index == 0) leds.led1 = 255;
+                else if (s_led_mode_marquee_index == 1) leds.led2 = 255;
+                else if (s_led_mode_marquee_index == 2) leds.led3 = 255;
+                leds_set_raw(leds);
+            }
+            break;
+        }
+        
+        case BOARD_LED_MODE_CONNECTED: {
+            // 连接闪烁：闪烁两次，每次亮 200ms，灭 200ms
+            if (s_led_mode_blink_count < 4) { // 总共 4 个半周期（亮 - 灭 - 亮 - 灭）
+                if (now - s_led_mode_last_change >= 200) {
+                    s_led_mode_last_change = now;
+                    board_leds_t leds = {0, 0, 0};
+                    if (s_led_mode_blink_count % 2 == 0) {
+                        // 亮
+                        leds.led1 = leds.led2 = leds.led3 = 255;
+                    } else {
+                        // 灭
+                        leds.led1 = leds.led2 = leds.led3 = 0;
+                    }
+                    leds_set_raw(leds);
+                    s_led_mode_blink_count++;
+                }
+            } else {
+                // 闪烁完成，熄灭并进入 OFF 状态
+                leds_set_raw((board_leds_t){0, 0, 0});
+                s_led_mode = BOARD_LED_MODE_OFF;
+            }
+            break;
+        }
+        
+        case BOARD_LED_MODE_BLINK: {
+            // 通用闪烁：每 500ms 切换状态
+            if (now - s_led_mode_last_change >= 500) {
+                s_led_mode_last_change = now;
+                s_led_mode_sub_state = !s_led_mode_sub_state;
+                if (s_led_mode_sub_state) {
+                    leds_set_raw((board_leds_t){255, 255, 255});
+                } else {
+                    leds_set_raw((board_leds_t){0, 0, 0});
+                }
+            }
+            break;
+        }
+        
+        case BOARD_LED_MODE_NOTIFY_FLASH: {
+            // 通知闪烁：快速闪两次，亮 100ms，灭 100ms
+            if (s_led_mode_blink_count < 4) { // 4 个半周期
+                if (now - s_led_mode_last_change >= 100) {
+                    s_led_mode_last_change = now;
+                    board_leds_t leds = {0, 0, 0};
+                    if (s_led_mode_blink_count % 2 == 0) {
+                        // 亮
+                        leds.led1 = leds.led2 = leds.led3 = 255;
+                    } else {
+                        // 灭
+                        leds.led1 = leds.led2 = leds.led3 = 0;
+                    }
+                    leds_set_raw(leds);
+                    s_led_mode_blink_count++;
+                }
+            } else {
+                // 闪烁完成，熄灭
+                leds_set_raw((board_leds_t){0, 0, 0});
+                s_led_mode = BOARD_LED_MODE_OFF;
+            }
+            break;
+        }
+        
+        default:
+            break;
+    }
+}
+
 /* ================== 状态查询 ================== */
 bool board_leds_is_active(void) {
-    return s_sm_state != LED_SM_IDLE;
+    return s_sm_state != LED_SM_IDLE || s_led_mode != BOARD_LED_MODE_OFF;
 }

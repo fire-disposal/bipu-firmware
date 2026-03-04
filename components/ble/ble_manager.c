@@ -8,6 +8,7 @@
 
 #include "ble_manager.h"
 #include "bipupu_protocol.h"
+#include "board.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -80,6 +81,9 @@ static uint32_t s_error_count = 0;
 static ble_message_callback_t s_message_callback = NULL;
 static ble_time_sync_callback_t s_time_sync_callback = NULL;
 static ble_connection_callback_t s_connection_callback = NULL;
+
+/* ================== 私有函数声明 ================== */
+static void handle_time_sync_directly(uint32_t timestamp);
 
 /** NUS 服务句柄 */
 static uint16_t s_nus_tx_char_handle;
@@ -172,6 +176,11 @@ static void handle_received_packet(const uint8_t* data, size_t length)
     switch (packet.message_type) {
         case BIPUPU_MSG_TIME_SYNC:
             ESP_LOGI(TAG, "收到时间同步消息: timestamp=%u", packet.timestamp);
+            
+            // 直接处理时间同步，调用硬件接口
+            handle_time_sync_directly(packet.timestamp);
+            
+            // 仍然调用回调函数，保持向后兼容
             if (s_time_sync_callback) {
                 s_time_sync_callback(packet.timestamp);
             }
@@ -771,6 +780,47 @@ void ble_manager_set_time_sync_callback(ble_time_sync_callback_t callback)
 {
     s_time_sync_callback = callback;
     ESP_LOGI(TAG, "时间同步回调已设置");
+}
+
+/**
+ * @brief 直接处理时间同步消息
+ * @param timestamp Unix时间戳 (秒)
+ * 
+ * 此函数在蓝牙层直接处理时间同步，调用硬件接口设置RTC时间
+ */
+static void handle_time_sync_directly(uint32_t timestamp)
+{
+    ESP_LOGI(TAG, "直接处理时间同步: timestamp=%u", timestamp);
+    
+    // 将Unix时间戳转换为年月日时分秒
+    time_t time_val = (time_t)timestamp;
+    struct tm *timeinfo = localtime(&time_val);
+    
+    if (!timeinfo) {
+        ESP_LOGE(TAG, "时间戳转换失败");
+        return;
+    }
+    
+    ESP_LOGI(TAG, "转换后时间：%04d-%02d-%02d %02d:%02d:%02d",
+             timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
+             timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+    
+    // 直接调用硬件接口设置RTC时间
+    esp_err_t ret = board_set_rtc(
+        timeinfo->tm_year + 1900, 
+        timeinfo->tm_mon + 1, 
+        timeinfo->tm_mday,
+        timeinfo->tm_hour, 
+        timeinfo->tm_min, 
+        timeinfo->tm_sec
+    );
+    
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "RTC 已成功更新（蓝牙层直接处理）");
+        board_notify();  // 通知用户时间已更新
+    } else {
+        ESP_LOGE(TAG, "RTC 更新失败：%s", esp_err_to_name(ret));
+    }
 }
 
 void ble_manager_set_connection_callback(ble_connection_callback_t callback)

@@ -23,17 +23,9 @@ static const char* APP_TAG = "app";
 // 任务句柄（用于后续管理）
 static TaskHandle_t s_gui_task_handle = NULL;
 
-/* LED 状态指示 */
-typedef enum {
-    LED_STATE_OFF,
-    LED_STATE_ADV_MARQUEE,   // 广播跑马灯
-    LED_STATE_CONNECT_BLINK, // 连接闪烁
-} led_state_t;
-
-static led_state_t s_led_state = LED_STATE_OFF;
-static uint32_t s_led_last_change = 0;
-static int s_marquee_index = 0; // 当前点亮的 LED 索引 (0-2)
-static int s_blink_count = 0;   // 已闪烁次数
+/* BLE 状态缓存（用于日志记录） */
+static bool s_last_connected = false;
+static bool s_last_advertising = false;
 
 /* ===================== GUI 任务 ===================== */
 // 事件通知句柄，用于唤醒 GUI 任务 (已在上方定义)
@@ -59,7 +51,7 @@ static void gui_task(void* pvParameters)
     for (;;) {
         // 等待重绘信号，最大等待时间由 ui_tick 返回值决定
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(sleep_ms));
-        
+
         sleep_ms = ui_tick();
     }
 }
@@ -80,7 +72,6 @@ esp_err_t app_init(void)
 
         // 设置回调
         ble_manager_set_message_callback(ble_message_received);
-        ble_manager_set_time_sync_callback(ble_time_sync_received);
         ble_manager_set_connection_callback(ble_connection_changed);
 
         // BLE 广播延后启动：由系统入口在所有初始化完成后触发
@@ -112,79 +103,23 @@ esp_err_t app_init(void)
     return ESP_OK;
 }
 
-static void app_led_tick(void) {
-    uint32_t now = board_time_ms();
-    // 优先级处理：手电筒优先，不应被常规 LED 状态覆盖；待机时保持熄灭
-    if (ui_is_flashlight_on()) {
-        return; // UI 已直接控制 LED（手电筒），保持当前状态
-    }
-    if (board_leds_is_active()) {
-        return; // LED 状态机正在运行（如跑马、闪烁等），保持当前状态
-    }
-    if (ui_is_in_standby()) {
-        board_leds_off();
-        return; // 休眠优先，保持 LED 熄灭
-    }
-
-    // 根据 BLE 状态更新 LED 状态
+static void update_ble_state_logging(void) {
+    // 仅用于记录 BLE 状态变化日志
     bool connected = ble_manager_is_connected();
     bool advertising = (ble_manager_get_state() == BLE_STATE_ADVERTISING);
 
-    // 状态转换
-    if (connected && s_led_state != LED_STATE_CONNECT_BLINK) {
-        s_led_state = LED_STATE_CONNECT_BLINK;
-        s_blink_count = 0;
-        s_led_last_change = now;
-        board_leds_off();
-    } else if (!connected && advertising && s_led_state != LED_STATE_ADV_MARQUEE) {
-        s_led_state = LED_STATE_ADV_MARQUEE;
-        s_marquee_index = 0;
-        s_led_last_change = now;
-        board_leds_off();
-    } else if (!connected && !advertising && s_led_state != LED_STATE_OFF) {
-        s_led_state = LED_STATE_OFF;
-        board_leds_off();
-    }
+    // 检查状态是否变化
+    if (connected != s_last_connected || advertising != s_last_advertising) {
+        s_last_connected = connected;
+        s_last_advertising = advertising;
 
-    // 状态行为
-    switch (s_led_state) {
-        case LED_STATE_ADV_MARQUEE:
-            // 每 300ms 切换一次 LED
-            if (now - s_led_last_change >= 300) {
-                s_led_last_change = now;
-                board_leds_t leds = {0, 0, 0};
-                if (s_marquee_index == 0) leds.led1 = 255;
-                else if (s_marquee_index == 1) leds.led2 = 255;
-                else if (s_marquee_index == 2) leds.led3 = 255;
-                board_leds_set(leds);
-                s_marquee_index = (s_marquee_index + 1) % 3;
-            }
-            break;
-        case LED_STATE_CONNECT_BLINK:
-            // 闪烁两次，每次亮 200ms，灭 200ms
-            if (s_blink_count < 4) { // 总共 4 个半周期（亮 - 灭 - 亮 - 灭）
-                if (now - s_led_last_change >= 200) {
-                    s_led_last_change = now;
-                    board_leds_t leds = {0, 0, 0};
-                    if (s_blink_count % 2 == 0) {
-                        // 亮
-                        leds.led1 = leds.led2 = leds.led3 = 255;
-                    } else {
-                        // 灭
-                        leds.led1 = leds.led2 = leds.led3 = 0;
-                    }
-                    board_leds_set(leds);
-                    s_blink_count++;
-                }
-            } else {
-                // 闪烁完成，熄灭并进入 OFF 状态
-                board_leds_off();
-                s_led_state = LED_STATE_OFF;
-            }
-            break;
-        case LED_STATE_OFF:
-            // 保持熄灭
-            break;
+        if (connected) {
+            ESP_LOGD(APP_TAG, "BLE connected");
+        } else if (advertising) {
+            ESP_LOGD(APP_TAG, "BLE advertising");
+        } else {
+            ESP_LOGD(APP_TAG, "BLE idle");
+        }
     }
 }
 
@@ -199,7 +134,7 @@ void app_loop(void)
 
     // 2. 震动马达状态更新：始终高频（定时器精度需要）
     board_vibrate_tick();
-    
+
     // 3. LED 状态机轮询：高频调用以保证动画流畅
     board_leds_tick();
 
@@ -212,11 +147,9 @@ void app_loop(void)
         // BLE 事件处理（NimBLE 事件驱动，此函数仅做轻量检查）
         ble_manager_poll();
 
-        // LED 状态指示（广播跑马灯，连接闪烁，仅更新状态）
-        app_led_tick();
+        // BLE 状态日志记录
+        update_ble_state_logging();
 
-        // 电池状态更新（已移至后台定时器）
-        // app_battery_tick();
     }
 }
 

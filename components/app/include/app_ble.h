@@ -2,7 +2,8 @@
  * @file app_ble.h
  * @brief 蓝牙应用层适配头文件 (Bipupu 协议版本 1.2)
  * 
- * 定义蓝牙消息接收、时间同步和连接状态变化的回调函数接口
+ * 定义蓝牙消息接收和连接状态变化的回调函数接口
+ * 时间同步已由蓝牙层直接处理
  */
 
 #pragma once
@@ -22,13 +23,6 @@ extern "C" {
  * @param timestamp Unix时间戳 (秒)
  */
 void ble_message_received(const char* sender, const char* message, uint32_t timestamp);
-
-/**
- * @brief 时间同步回调函数
- * 
- * @param timestamp Unix时间戳 (秒)
- */
-void ble_time_sync_received(uint32_t timestamp);
 
 /**
  * @brief 蓝牙连接状态变化回调函数
