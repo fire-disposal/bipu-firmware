@@ -22,7 +22,6 @@ typedef struct {
 } storage_message_t;
 
 esp_err_t storage_init(void);
-esp_err_t storage_nvs_init(void);
 
 esp_err_t storage_save_messages(const storage_message_t* msgs, int count, int current_idx);
 esp_err_t storage_load_messages(storage_message_t* msgs, int* out_count, int* out_current_idx);

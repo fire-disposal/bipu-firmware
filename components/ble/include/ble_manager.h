@@ -152,51 +152,6 @@ uint16_t ble_manager_get_conn_id(void);
  */
 esp_err_t ble_manager_disconnect(void);
 
-/**
- * @brief 发送文本消息 (设备到手机)
- * 
- * @param text 文本内容 (UTF-8)
- * @param text_length 文本长度 (字节)
- * @return esp_err_t ESP_OK 成功，其他值失败
- */
-esp_err_t ble_manager_send_text_message(const char* text, size_t text_length);
-
-/**
- * @brief 发送时间同步响应 (设备到手机)
- * 
- * @param timestamp Unix时间戳 (秒)
- * @return esp_err_t ESP_OK 成功，其他值失败
- */
-esp_err_t ble_manager_send_time_sync_response(uint32_t timestamp);
-
-/**
- * @brief 初始化并启动蓝牙 NimBLE 堆栈（替代手动初始化流程）
- */
-void ble_manager_start(void);
-
-/**
- * @brief 强制清除所有绑定信息并断开连接（用于本地按键解绑）
- */
-void ble_manager_force_reset_bonds(void);
-
-/**
- * @brief 发送绑定信息到手机
- * @param app_id 应用ID
- * @param user_name 用户名
- * @return esp_err_t ESP_OK 成功，其他值失败
- */
-esp_err_t ble_manager_send_binding_info(const char* app_id, const char* user_name);
-
-/**
- * @brief 发送解绑确认到手机
- * @return esp_err_t ESP_OK 成功，其他值失败
- */
-esp_err_t ble_manager_send_unbind_confirm(void);
-
-/**
- * @brief 清理蓝牙管理器资源
- */
-void ble_manager_cleanup(void);
 
 /**
  * @brief 全局连接状态标识（可直接读取）

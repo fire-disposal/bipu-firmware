@@ -203,6 +203,14 @@ void app_cleanup(void)
 // 在系统就绪后启动应用级服务（例如 BLE 广播）
 esp_err_t app_start_services(void) {
     ESP_LOGI(APP_TAG, "Starting app services (post-init)");
+    
+    // 检查 BLE 状态，如果未初始化或出错则跳过广播
+    ble_state_t state = ble_manager_get_state();
+    if (state == BLE_STATE_UNINITIALIZED || state == BLE_STATE_ERROR) {
+        ESP_LOGW(APP_TAG, "BLE 未就绪 (状态=%d)，跳过广播启动", state);
+        return ESP_FAIL;
+    }
+
     esp_err_t ret = ESP_OK;
 
     // 仅在 BLE 初始化成功的情况下尝试启动广告

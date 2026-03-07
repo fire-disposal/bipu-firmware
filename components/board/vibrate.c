@@ -11,49 +11,41 @@
 
 static const char* TAG = "BOARD_VIBRATE";
 
-/* ================== 震动状态机定义 ================== */
-
-typedef enum {
-    VIB_SM_IDLE,           // 空闲状态
-    VIB_SM_SHORT,          // 短震动
-    VIB_SM_DOUBLE,         // 震动两次
-} vib_sm_state_t;
-
 /* ================== 配置常量 ================== */
-// PWM 配置参数
 #define VIBRATE_LEDC_TIMER      LEDC_TIMER_0
 #define VIBRATE_LEDC_MODE       LEDC_LOW_SPEED_MODE
 #define VIBRATE_LEDC_CHANNEL    LEDC_CHANNEL_0
 #define VIBRATE_LEDC_RES        LEDC_TIMER_10_BIT
-#define VIBRATE_LEDC_FREQ       200     // 降低频率以获得更强的震感
+#define VIBRATE_LEDC_FREQ       200     // 200Hz 震感较强
 #define VIBRATE_DUTY_ON         (1023)  // 100% 占空比
 
-// 震动时序配置
-#define VIB_SHORT_ON_MS         150     // 短震动持续时间
-#define VIB_DOUBLE_ON_MS        150     // 双震每次持续时间
-#define VIB_DOUBLE_GAP_MS       100     // 双震间隔
+/* ================== 模式定义 ================== */
+#define MAX_PATTERN_STEPS 8
 
-/* ================== 模块状态 ================== */
-static vib_sm_state_t s_sm_state = VIB_SM_IDLE;
-static uint32_t s_sm_start_time = 0;
-static uint32_t s_sm_last_change = 0;
-static int s_sm_sub_state = 0;          // 子状态 (0=第一次亮，1=间隔，2=第二次亮)
+typedef struct {
+    uint32_t durations[MAX_PATTERN_STEPS]; // 震动模式时间数组 (ms)
+    uint8_t count;                         // 步骤总数
+    uint8_t current_idx;                   // 当前步骤索引
+    uint32_t next_switch_time;             // 下次切换的时间点
+    bool active;                           // 是否处于活动状态
+} vib_state_t;
+
+static vib_state_t s_vib = {0};
 static bool s_vibrate_initialized = false;
+
+/* 预定义模式 */
+static const uint32_t PATTERN_SHORT[] = { 150 };
+static const uint32_t PATTERN_DOUBLE[] = { 150, 100, 150 };
 
 /* ================== 内部辅助函数 ================== */
 
-// 设置 PWM 占空比
 static void vibrate_set_pwm(uint32_t duty) {
     ledc_set_duty(VIBRATE_LEDC_MODE, VIBRATE_LEDC_CHANNEL, duty);
     ledc_update_duty(VIBRATE_LEDC_MODE, VIBRATE_LEDC_CHANNEL);
 }
 
-// 设置状态机为空闲
-static void sm_set_idle(void) {
-    s_sm_state = VIB_SM_IDLE;
-    s_sm_start_time = 0;
-    s_sm_last_change = 0;
-    s_sm_sub_state = 0;
+static void stop_vibration(void) {
+    s_vib.active = false;
     vibrate_set_pwm(0);
 }
 
@@ -65,7 +57,7 @@ void board_vibrate_init(void) {
         return;
     }
 
-    // 配置震动马达 GPIO 为输出
+    // GPIO 配置
     gpio_config_t vibrate_config = {
         .pin_bit_mask = (1ULL << BOARD_GPIO_VIBRATE),
         .mode = GPIO_MODE_OUTPUT,
@@ -113,104 +105,79 @@ void board_vibrate_init(void) {
     gpio_set_drive_capability(BOARD_GPIO_VIBRATE, GPIO_DRIVE_CAP_3);
 
     s_vibrate_initialized = true;
-    sm_set_idle();
+    stop_vibration();
     
-    ESP_LOGI(TAG, "Vibrate motor initialized (PWM %dHz) on GPIO%d",
+    ESP_LOGI(TAG, "Vibrate motor initialized (PWM %dHz) on GPIO%d", 
              VIBRATE_LEDC_FREQ, BOARD_GPIO_VIBRATE);
 }
 
-void board_vibrate_short(void) {
+void board_vibrate_pattern(const uint32_t* ms_array, uint8_t count) {
     if (!s_vibrate_initialized) return;
     
-    // 如果已经在震动中，不中断（简单优先级）
-    if (s_sm_state != VIB_SM_IDLE) return;
+    // 允许覆盖：重置状态
+    stop_vibration();
+
+    if (!ms_array || count == 0) return;
+
+    if (count > MAX_PATTERN_STEPS) {
+        count = MAX_PATTERN_STEPS;
+        ESP_LOGW(TAG, "Pattern truncated to %d steps", MAX_PATTERN_STEPS);
+    }
+
+    // 复制模式数据到静态缓冲区，避免外部内存释放问题
+    for (int i=0; i<count; i++) {
+        s_vib.durations[i] = ms_array[i];
+    }
     
-    s_sm_state = VIB_SM_SHORT;
-    s_sm_start_time = board_time_ms();
-    s_sm_last_change = board_time_ms();
-    s_sm_sub_state = 0;  // 0=震动
+    s_vib.count = count;
+    s_vib.current_idx = 0;
+    s_vib.active = true;
+    
+    // 立即启动第一步 (ON)
     vibrate_set_pwm(VIBRATE_DUTY_ON);
+    s_vib.next_switch_time = board_time_ms() + s_vib.durations[0];
     
-    ESP_LOGD(TAG, "Short vibrate started");
+    ESP_LOGD(TAG, "Vibrate pattern started (%d steps)", count);
+}
+
+void board_vibrate_short(void) {
+    board_vibrate_pattern(PATTERN_SHORT, sizeof(PATTERN_SHORT)/sizeof(uint32_t));
 }
 
 void board_vibrate_double(void) {
-    if (!s_vibrate_initialized) return;
-    
-    // 如果已经在震动中，不中断
-    if (s_sm_state != VIB_SM_IDLE) return;
-    
-    s_sm_state = VIB_SM_DOUBLE;
-    s_sm_start_time = board_time_ms();
-    s_sm_last_change = board_time_ms();
-    s_sm_sub_state = 0;  // 0=第一次震动
-    vibrate_set_pwm(VIBRATE_DUTY_ON);
-    
-    ESP_LOGD(TAG, "Double vibrate started");
+    board_vibrate_pattern(PATTERN_DOUBLE, sizeof(PATTERN_DOUBLE)/sizeof(uint32_t));
 }
 
 void board_vibrate_off(void) {
     if (!s_vibrate_initialized) return;
-    
-    sm_set_idle();
+    stop_vibration();
     ESP_LOGD(TAG, "Vibrate forced OFF");
 }
 
-/* ================== 震动状态机轮询 ================== */
 void board_vibrate_tick(void) {
-    if (!s_vibrate_initialized || s_sm_state == VIB_SM_IDLE) {
-        return;
-    }
+    if (!s_vibrate_initialized || !s_vib.active) return;
 
     uint32_t now = board_time_ms();
-
-    switch (s_sm_state) {
-        case VIB_SM_SHORT: {
-            // 短震动：震动 150ms -> 停止
-            if (now - s_sm_last_change >= VIB_SHORT_ON_MS) {
-                sm_set_idle();
-                ESP_LOGD(TAG, "Short vibrate completed");
-            }
-            break;
+    
+    if (now >= s_vib.next_switch_time) {
+        s_vib.current_idx++;
+        
+        if (s_vib.current_idx >= s_vib.count) {
+            // 模式结束
+            stop_vibration();
+            ESP_LOGD(TAG, "Vibrate pattern completed");
+        } else {
+            // 切换状态: 偶数索引=ON, 奇数索引=OFF
+            // 索引 0 (ON) -> 1 (OFF) -> 2 (ON) ...
+            bool turn_on = (s_vib.current_idx % 2 == 0);
+            vibrate_set_pwm(turn_on ? VIBRATE_DUTY_ON : 0);
+            
+            s_vib.next_switch_time = now + s_vib.durations[s_vib.current_idx];
         }
-
-        case VIB_SM_DOUBLE: {
-            // 震动两次：震 150ms -> 停 100ms -> 震 150ms -> 停
-            if (s_sm_sub_state == 0) {
-                // 第一次震动
-                if (now - s_sm_last_change >= VIB_DOUBLE_ON_MS) {
-                    s_sm_sub_state = 1;
-                    s_sm_last_change = now;
-                    vibrate_set_pwm(0);  // 停止（间隔）
-                }
-            } else if (s_sm_sub_state == 1) {
-                // 间隔
-                if (now - s_sm_last_change >= VIB_DOUBLE_GAP_MS) {
-                    s_sm_sub_state = 2;
-                    s_sm_last_change = now;
-                    vibrate_set_pwm(VIBRATE_DUTY_ON);  // 第二次震动
-                }
-            } else {
-                // 第二次震动
-                if (now - s_sm_last_change >= VIB_DOUBLE_ON_MS) {
-                    sm_set_idle();
-                    ESP_LOGD(TAG, "Double vibrate completed");
-                }
-            }
-            break;
-        }
-
-        default:
-            sm_set_idle();
-            break;
     }
 }
 
-/* ================== 状态查询 ================== */
 bool board_vibrate_is_active(void) {
-    return s_vibrate_initialized && s_sm_state != VIB_SM_IDLE;
+    return s_vibrate_initialized && s_vib.active;
 }
 
-bool board_vibrate_is_initialized(void) {
-    return s_vibrate_initialized;
-}

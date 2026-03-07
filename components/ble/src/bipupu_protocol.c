@@ -325,50 +325,6 @@ size_t bipupu_protocol_create_time_sync(uint32_t timestamp, uint8_t* buffer, siz
     return packet_length;
 }
 
-size_t bipupu_protocol_create_text_message(uint32_t timestamp, const char* text, 
-                                          size_t text_length, uint8_t* buffer, 
-                                          size_t buffer_size)
-{
-    if (!text || !buffer) {
-        ESP_LOGE(TAG, "无效的输入参数");
-        return 0;
-    }
-    
-    // 限制文本长度
-    if (text_length > BIPUPU_MAX_DATA_LENGTH) {
-        ESP_LOGW(TAG, "文本长度超出限制: %zu 字节, 截断为 %d 字节", 
-                text_length, BIPUPU_MAX_DATA_LENGTH);
-        text_length = BIPUPU_MAX_DATA_LENGTH;
-    }
-    
-    // 计算所需缓冲区大小
-    size_t required_size = BIPUPU_HEADER_LENGTH + text_length + BIPUPU_CHECKSUM_LENGTH;
-    if (buffer_size < required_size) {
-        ESP_LOGE(TAG, "缓冲区不足: %zu 字节 (需要 %zu 字节)", buffer_size, required_size);
-        return 0;
-    }
-    
-    // 构建数据包
-    buffer[0] = BIPUPU_PROTOCOL_HEADER;  // 协议头
-    write_le32(&buffer[1], timestamp);   // 时间戳
-    buffer[5] = BIPUPU_MSG_TEXT;         // 消息类型
-    write_le16(&buffer[6], (uint16_t)text_length); // 数据长度
-    
-    // 复制文本数据
-    if (text_length > 0) {
-        memcpy(&buffer[BIPUPU_HEADER_LENGTH], text, text_length);
-    }
-    
-    // 计算校验和 (不包括校验和本身)
-    size_t packet_length = BIPUPU_HEADER_LENGTH + text_length + BIPUPU_CHECKSUM_LENGTH;
-    uint8_t checksum = bipupu_protocol_calculate_checksum(buffer, packet_length - 1);
-    buffer[packet_length - 1] = checksum;
-    
-    ESP_LOGI(TAG, "创建文本消息数据包: 时间戳=%u, 文本长度=%zu, 总长度=%zu", 
-            timestamp, text_length, packet_length);
-    
-    return packet_length;
-}
 
 /**
  * @brief 创建绑定信息数据包

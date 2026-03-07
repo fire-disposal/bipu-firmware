@@ -301,16 +301,10 @@ void board_leds_set(board_leds_t leds) {
     leds_unlock();
 }
 
-board_leds_t board_leds_get_state(void) {
-    return s_flashlight ? ALL_ON : ALL_OFF;
-}
-
 void board_leds_short_flash(void)            { board_leds_set_mode(BOARD_LED_MODE_NOTIFY_FLASH); }
 void board_leds_double_flash(void)           { board_leds_set_mode(BOARD_LED_MODE_NOTIFY_FLASH); }
 void board_leds_continuous_blink_start(void) { board_leds_set_mode(BOARD_LED_MODE_BLINK);        }
 void board_leds_continuous_blink_stop(void)  { board_leds_set_mode(BOARD_LED_MODE_OFF);          }
 void board_leds_gallop_start(void)           { board_leds_set_mode(BOARD_LED_MODE_MARQUEE);      }
 void board_leds_gallop_stop(void)            { board_leds_set_mode(BOARD_LED_MODE_OFF);          }
-void board_leds_enable_ble_auto_indicator(bool enable) { (void)enable; }
-void board_leds_set_ble_state_callbacks(
-    void (*cc)(bool connected), void (*ac)(bool adv)) { (void)cc; (void)ac; }
+

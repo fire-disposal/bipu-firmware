@@ -123,13 +123,6 @@ void board_notify(void);
 /* ================== 电源管理接口 ================== */
 /* 低电压保护功能已弃用。电压读取请使用 board_battery_voltage() / board_battery_percent()。 */
 
-/* ================== 震动接口 (状态机) ================== */
-void board_vibrate_init(void);
-void board_vibrate_short(void);           // 短震动
-void board_vibrate_double(void);          // 震动两次
-void board_vibrate_off(void);
-void board_vibrate_tick(void);            // 状态机轮询，需在主循环中调用
-bool board_vibrate_is_active(void);
 
 /* ================== 三个独立白光 LED 接口（双层状态机 v2）================== */
 /*
@@ -149,19 +142,12 @@ bool board_leds_is_active(void);
 bool board_leds_is_initialized(void);
 /* 遗留 API（保持签名兼容，内部转发至新状态机） */
 void board_leds_set(board_leds_t leds);
-board_leds_t board_leds_get_state(void);
 void board_leds_short_flash(void);
 void board_leds_double_flash(void);
 void board_leds_continuous_blink_start(void);
 void board_leds_continuous_blink_stop(void);
 void board_leds_gallop_start(void);
 void board_leds_gallop_stop(void);
-void board_leds_enable_ble_auto_indicator(bool enable);
-void board_leds_set_ble_state_callbacks(
-    void (*connected_callback)(bool connected),
-    void (*advertising_callback)(bool advertising)
-);
-
 
 /* ================== 输入与传感器 ================== */
 
@@ -177,9 +163,7 @@ bool        board_battery_is_charging(void);
 // 已移除：电池管理逻辑已上移至 app 层
 
 
-/* ================== RTC 与 系统 ================== */
-
-esp_err_t board_set_rtc(uint16_t year, uint8_t month, uint8_t day, 
+esp_err_t board_set_rtc(uint16_t year, uint8_t month, uint8_t day,
                         uint8_t hour, uint8_t minute, uint8_t second);
 esp_err_t board_set_rtc_from_timestamp(time_t timestamp);
 void      board_system_restart(void);
@@ -203,7 +187,6 @@ void board_execute_cleanup(void);
 
 // 通用通知接口
 void board_notify(void);
-
 #ifdef __cplusplus
 }
 #endif

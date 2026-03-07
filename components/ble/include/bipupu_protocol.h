@@ -109,18 +109,6 @@ void bipupu_protocol_decode_utf8_safe(const uint8_t* data, size_t length, char* 
  */
 size_t bipupu_protocol_create_time_sync(uint32_t timestamp, uint8_t* buffer, size_t buffer_size);
 
-/**
- * @brief 创建文本消息数据包
- * 
- * @param timestamp Unix时间戳 (秒)
- * @param text UTF-8编码的文本
- * @param text_length 文本长度 (字节数)
- * @param buffer 输出缓冲区
- * @param buffer_size 缓冲区大小
- * @return size_t 实际写入的字节数，0表示失败
- */
-size_t bipupu_protocol_create_text_message(uint32_t timestamp, const char* text, size_t text_length, 
-                                          uint8_t* buffer, size_t buffer_size);
 
 /**
  * @brief 创建绑定信息数据包

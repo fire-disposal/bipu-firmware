@@ -494,10 +494,10 @@ static esp_err_t nus_tx_notify(const uint8_t* data, size_t length)
     }
     
     // 通过 NUS TX 特征值（s_nus_tx_val_handle）向订阅的手机发送通知
+    // 注意：无论成功与否，ble_gattc_notify_custom 都会消耗 om，无需手动释放
     int rc = ble_gattc_notify_custom(s_conn_handle, s_nus_tx_val_handle, om);
     if (rc != 0) {
         ESP_LOGE(TAG, "发送通知失败: %d", rc);
-        os_mbuf_free_chain(om);
         return ESP_FAIL;
     }
     
@@ -531,28 +531,8 @@ static void ble_on_sync(void)
         return;
     }
     
-    // 生成设备名称
-    generate_device_name();
-    
-    // 设置设备名称
-    rc = ble_svc_gap_device_name_set(s_device_name);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "设置设备名称失败: %d", rc);
-        return;
-    }
-    
-    // 注册GATT服务
-    rc = ble_gatts_count_cfg(nus_gatt_svcs);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "GATT服务计数失败: %d", rc);
-        return;
-    }
-    
-    rc = ble_gatts_add_svcs(nus_gatt_svcs);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "添加GATT服务失败: %d", rc);
-        return;
-    }
+    // 更新设备名称 (GAP) - 确保同步
+    ble_svc_gap_device_name_set(s_device_name);
     
     ESP_LOGI(TAG, "BLE 主机同步完成");
     update_ble_state(BLE_STATE_IDLE);
@@ -707,18 +687,40 @@ esp_err_t ble_manager_init(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "NimBLE HCI初始化失败: %s", esp_err_to_name(ret));
         update_ble_state(BLE_STATE_ERROR);
+        // HCI 初始化失败通常需要重启解决，或者检查分区/硬件
         return ret;
     }
     
     nimble_port_init();
     
-    // 配置BLE主机
+    // 初始化 GAP 和 GATT 服务 (必须在 nimble_port_init 之后)
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+    
+    // 注册自定义 GATT 服务 (NUS)
+    int rc = ble_gatts_count_cfg(nus_gatt_svcs);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "GATT服务计数失败: %d", rc);
+        esp_nimble_hci_deinit();
+        update_ble_state(BLE_STATE_ERROR);
+        return ESP_FAIL;
+    }
+    
+    rc = ble_gatts_add_svcs(nus_gatt_svcs);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "添加GATT服务失败: %d", rc);
+        esp_nimble_hci_deinit();
+        update_ble_state(BLE_STATE_ERROR);
+        return ESP_FAIL;
+    }
+
+    // 配置BLE主机回调
     ble_hs_cfg.reset_cb = ble_on_reset;
     ble_hs_cfg.sync_cb = ble_on_sync;
     ble_hs_cfg.gatts_register_cb = NULL;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
     
-    // 设置设备名称
+    // 设置设备名称 (GAP Service)
     generate_device_name();
     ble_svc_gap_device_name_set(s_device_name);
     
@@ -761,7 +763,7 @@ esp_err_t ble_manager_deinit(void)
 
 esp_err_t ble_manager_start_advertising(void)
 {
-    if (s_ble_state != BLE_STATE_IDLE && s_ble_state != BLE_STATE_ERROR) {
+    if (s_ble_state != BLE_STATE_IDLE) {
         ESP_LOGW(TAG, "无效状态，无法开始广播: %d", s_ble_state);
         return ESP_ERR_INVALID_STATE;
     }
@@ -897,38 +899,6 @@ esp_err_t ble_manager_disconnect(void)
     return ESP_OK;
 }
 
-esp_err_t ble_manager_send_text_message(const char* text, size_t text_length)
-{
-    if (!text || text_length == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    // 获取当前时间戳
-    time_t now = time(NULL);
-    if (now < 0) {
-        now = 0;
-    }
-    
-    // 创建数据包
-    uint8_t buffer[512];
-    size_t packet_length = bipupu_protocol_create_text_message(
-        (uint32_t)now, text, text_length, buffer, sizeof(buffer));
-    
-    if (packet_length == 0) {
-        ESP_LOGE(TAG, "创建文本消息数据包失败");
-        return ESP_FAIL;
-    }
-    
-    // 发送数据
-    esp_err_t ret = nus_tx_notify(buffer, packet_length);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "发送文本消息失败");
-        return ret;
-    }
-    
-    ESP_LOGI(TAG, "文本消息发送成功: %s", text);
-    return ESP_OK;
-}
 
 esp_err_t ble_manager_send_time_sync_response(uint32_t timestamp)
 {
@@ -953,72 +923,6 @@ esp_err_t ble_manager_send_time_sync_response(uint32_t timestamp)
     return ESP_OK;
 }
 
-/**
- * @brief 发送绑定信息到设备
- */
-esp_err_t ble_manager_send_binding_info(const char* app_id, const char* user_name)
-{
-    if (!app_id || !user_name) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    
-    // 创建简单的绑定信息字符串
-    char binding_info[256];
-    int len = snprintf(binding_info, sizeof(binding_info),
-                      "{\"appId\":\"%s\",\"userName\":\"%s\",\"timestamp\":%lld,\"platform\":\"esp32\"}",
-                      app_id, user_name, (long long)time(NULL));
-    
-    if (len < 0 || len >= (int)sizeof(binding_info)) {
-        ESP_LOGE(TAG, "创建绑定信息字符串失败");
-        return ESP_FAIL;
-    }
-    
-    // 创建绑定信息数据包
-    uint8_t buffer[512];
-    size_t packet_length = bipupu_protocol_create_binding_info(
-        (uint32_t)time(NULL), binding_info, strlen(binding_info), buffer, sizeof(buffer));
-    
-    if (packet_length == 0) {
-        ESP_LOGE(TAG, "创建绑定信息数据包失败");
-        return ESP_FAIL;
-    }
-    
-    // 发送数据
-    esp_err_t ret = nus_tx_notify(buffer, packet_length);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "发送绑定信息失败");
-        return ret;
-    }
-    
-    ESP_LOGI(TAG, "绑定信息发送成功: appId=%s, userName=%s", app_id, user_name);
-    return ESP_OK;
-}
-
-/**
- * @brief 发送解绑确认到设备
- */
-esp_err_t ble_manager_send_unbind_confirm(void)
-{
-    // 创建解绑确认数据包
-    uint8_t buffer[64];
-    size_t packet_length = bipupu_protocol_create_unbind_confirm(
-        (uint32_t)time(NULL), buffer, sizeof(buffer));
-    
-    if (packet_length == 0) {
-        ESP_LOGE(TAG, "创建解绑确认数据包失败");
-        return ESP_FAIL;
-    }
-    
-    // 发送数据
-    esp_err_t ret = nus_tx_notify(buffer, packet_length);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "发送解绑确认失败");
-        return ret;
-    }
-    
-    ESP_LOGI(TAG, "解绑确认发送成功");
-    return ESP_OK;
-}
 
 /**
  * @brief 强制清除所有绑定信息并断开连接
