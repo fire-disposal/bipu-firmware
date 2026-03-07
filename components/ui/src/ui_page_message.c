@@ -260,24 +260,24 @@ static void on_key(board_key_t key) {
             break;
             
         case BOARD_KEY_DOWN:
+        case BOARD_KEY_DOWN_REPEAT:
             // 向下滚动，如果已到底部则切换到下一条
             if (s_vertical_offset < max_scroll) {
                 s_vertical_offset += SCROLL_STEP;
                 if (s_vertical_offset > max_scroll) s_vertical_offset = max_scroll;
             } else if (idx < count - 1) {
-                // 切换到下一条消息
                 ui_set_current_message_idx(idx + 1);
                 s_vertical_offset = 0;
             }
             break;
             
         case BOARD_KEY_UP:
+        case BOARD_KEY_UP_REPEAT:
             // 向上滚动，如果已到顶部则切换到上一条
             if (s_vertical_offset > 0) {
                 s_vertical_offset -= SCROLL_STEP;
                 if (s_vertical_offset < 0) s_vertical_offset = 0;
             } else if (idx > 0) {
-                // 切换到上一条消息
                 ui_set_current_message_idx(idx - 1);
                 s_vertical_offset = 0;
             }

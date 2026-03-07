@@ -224,10 +224,12 @@ static void on_key(board_key_t key) {
             extern void ble_manager_force_reset_bonds(void);
             ble_manager_force_reset_bonds();
             s_show_unbind_confirm = false;
+            ui_show_toast("解绑成功，即将重启", 2000);
         } else if (key == BOARD_KEY_DOWN || key == BOARD_KEY_BACK) {
             // 取消解绑
             ESP_LOGI(TAG, "用户取消解绑");
             s_show_unbind_confirm = false;
+            ui_show_toast("已取消", 1200);
         }
         return;
     }
@@ -242,12 +244,18 @@ static void on_key(board_key_t key) {
                         brightness += 10;
                         if (brightness > 100) brightness = 100;
                         ui_set_brightness(brightness);
+                        char buf[20];
+                        snprintf(buf, sizeof(buf), "亮度: %d%%", brightness);
+                        ui_show_toast(buf, 1200);
                     }
                 } else if (key == BOARD_KEY_DOWN) {
                     if (brightness > 10) {
                         brightness -= 10;
                         if (brightness < 10) brightness = 10;
                         ui_set_brightness(brightness);
+                        char buf[20];
+                        snprintf(buf, sizeof(buf), "亮度: %d%%", brightness);
+                        ui_show_toast(buf, 1200);
                     }
                 } else if (key == BOARD_KEY_ENTER || key == BOARD_KEY_BACK) {
                     s_editing = false;
@@ -278,6 +286,7 @@ static void on_key(board_key_t key) {
                         break;
                     case SETTING_FLASHLIGHT:
                         ui_toggle_flashlight();
+                        ui_show_toast(ui_is_flashlight_on() ? "手电筒 已开启" : "手电筒 已关闭", 1500);
                         break;
                     case SETTING_LOCKSCREEN:
                         // 立即进入屏保/锁屏

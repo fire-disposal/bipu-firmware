@@ -231,10 +231,51 @@ bool bipupu_protocol_parse(const uint8_t* data, size_t length, bipupu_parsed_pac
     
     // 根据消息类型处理数据
     switch (result->message_type) {
-        case BIPUPU_MSG_TEXT:
-            // UTF-8解码文本
-            bipupu_protocol_decode_utf8_safe(result->data, result->data_length, result->text);
+        case BIPUPU_MSG_TEXT: {
+            /* ── TEXT 消息解析 ─────────────────────────────────────────────────
+             * 数据布局: [1B: sender_len][sender UTF-8 bytes][body UTF-8 bytes]
+             *
+             * sender_len = 0  → 直接蓝牙发送（DeviceDetailPage），发送者 = "App"
+             * sender_len > 0  → 网络转发消息，发送者为联系人显示名
+             *
+             * 若数据格式非法（长度不足、sender_len 超出范围），降级处理：
+             *   sender_name = "App"，body_text = 尽力解码全部 data 字节
+             */
+            if (result->data_length == 0) {
+                /* 空数据包 */
+                snprintf(result->sender_name, sizeof(result->sender_name), "App");
+                result->body_text[0] = '\0';
+                break;
+            }
+
+            uint8_t sender_len = result->data[0];
+
+            /* 验证 sender_len 合法性 */
+            bool sender_valid = (sender_len > 0)
+                && ((size_t)(1 + sender_len) <= result->data_length)
+                && (sender_len < sizeof(result->sender_name));
+
+            if (sender_valid) {
+                /* 提取发送者名称（无需二次 UTF-8 解码，已是合法 UTF-8 字节） */
+                memcpy(result->sender_name, &result->data[1], sender_len);
+                result->sender_name[sender_len] = '\0';
+            } else {
+                /* sender_len=0 或格式非法，均降级为 "App" */
+                snprintf(result->sender_name, sizeof(result->sender_name), "App");
+            }
+
+            /* 解析正文 */
+            size_t body_offset = sender_valid ? (size_t)(1 + sender_len) : 1;
+            size_t body_len    = result->data_length > body_offset
+                                     ? result->data_length - body_offset : 0;
+            bipupu_protocol_decode_utf8_safe(
+                &result->data[body_offset], body_len, result->body_text);
+
+            /* text 字段与 body_text 保持一致，供遗留代码使用 */
+            strncpy(result->text, result->body_text, sizeof(result->text) - 1);
+            result->text[sizeof(result->text) - 1] = '\0';
             break;
+        }
             
         case BIPUPU_MSG_TIME_SYNC:
             // 时间同步消息，数据通常为空

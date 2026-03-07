@@ -125,20 +125,27 @@ static key_event_type_t button_process(int button) {
 static void key_timer_cb(void* arg) {
     if (!s_keys_initialized || s_key_queue == NULL) return;
 
+    static const board_key_t short_map[BUTTON_COUNT] = {
+        BOARD_KEY_UP,   BOARD_KEY_DOWN,   BOARD_KEY_ENTER,   BOARD_KEY_BACK
+    };
+    static const board_key_t long_map[BUTTON_COUNT] = {
+        BOARD_KEY_UP_LONG,   BOARD_KEY_DOWN_LONG,   BOARD_KEY_ENTER_LONG,   BOARD_KEY_BACK_LONG
+    };
+    /* REPEAT 仅对方向键有意义，用于快速滚动；ENTER/BACK 的 REPEAT 映射到自身 */
+    static const board_key_t repeat_map[BUTTON_COUNT] = {
+        BOARD_KEY_UP_REPEAT, BOARD_KEY_DOWN_REPEAT, BOARD_KEY_ENTER_REPEAT, BOARD_KEY_BACK_REPEAT
+    };
+
     for (int i = 0; i < BUTTON_COUNT; i++) {
         key_event_type_t event = button_process(i);
-        
-        if (event == KEY_EVENT_SHORT_PRESS || event == KEY_EVENT_LONG_PRESS) {
-            static const board_key_t key_map[BUTTON_COUNT] = {
-                BOARD_KEY_UP,
-                BOARD_KEY_DOWN,
-                BOARD_KEY_ENTER,
-                BOARD_KEY_BACK
-            };
-            board_key_t key = key_map[i];
-            // 发送到队列，不阻塞
-            xQueueSend(s_key_queue, &key, 0);
+        board_key_t key;
+        switch (event) {
+            case KEY_EVENT_SHORT_PRESS: key = short_map[i];  break;
+            case KEY_EVENT_LONG_PRESS:  key = long_map[i];   break;
+            case KEY_EVENT_REPEAT:      key = repeat_map[i]; break;
+            default: continue;
         }
+        xQueueSend(s_key_queue, &key, 0);
     }
 }
 

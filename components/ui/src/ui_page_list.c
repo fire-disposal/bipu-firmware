@@ -16,23 +16,19 @@ static const char* TAG = "PAGE_LIST";
 #define LINE_HEIGHT 12
 #define STATUS_BAR_Y 10
 #define CONTENT_START_Y 24
-#define LONG_PRESS_MS 1000  // 长按删除的时间阈值
 
 // 页面状态
-static uint32_t s_back_press_start = 0;
 static bool s_delete_mode = false;
 static uint32_t s_delete_anim_start = 0;  // 删除动画开始时间
 
 static void page_on_enter(void) {
     ESP_LOGD(TAG, "Entering Message List Page");
-    s_back_press_start = 0;
     s_delete_mode = false;
     s_delete_anim_start = 0;
 }
 
 static void page_on_exit(void) {
     s_delete_mode = false;
-    s_back_press_start = 0;
 }
 
 // 渲染上下文 (用于 update -> render 传递数据，避免渲染时竞态)
@@ -51,20 +47,7 @@ typedef struct {
 static list_render_ctx_t s_ctx;
 
 static uint32_t update(void) {
-    // 1. 长按检测逻辑
-    if (s_back_press_start > 0 && !s_delete_mode) {
-        uint32_t now = board_time_ms();
-        if (now - s_back_press_start >= LONG_PRESS_MS) {
-            s_delete_mode = true;
-            s_delete_anim_start = now;
-            s_back_press_start = 0;
-            ESP_LOGD(TAG, "Long press detected - entering delete mode");
-        }
-        // 按下期间高频检查
-        return 100;
-    }
-
-    // 2. 准备渲染数据 (在锁保护下执行)
+    // 准备渲染数据 (在锁保护下执行)
     int total = ui_get_message_count();
     int selected_idx = ui_get_current_message_idx();
     
@@ -96,8 +79,8 @@ static uint32_t update(void) {
         }
     }
 
-    // 普通状态下不需要高频刷新，除非在删除模式动画
-    if (s_delete_mode) return 100; // 动画刷新
+    // 删除模式下需要高频刷新（动画闪烁）
+    if (s_delete_mode) return 100;
     return 1000;
 }
 
@@ -189,32 +172,34 @@ static void on_key(board_key_t key) {
             ESP_LOGI(TAG, "Deleting message at index %d", idx);
             ui_delete_current_message();
             s_delete_mode = false;
+            ui_show_toast("消息已删除", 1500);
             if (ui_get_message_count() == 0) {
                 ui_change_page(UI_STATE_MAIN);
             }
             return;
-        } else if (key == BOARD_KEY_BACK) {
-            // 取消删除
+        } else {
+            // 任意其他键取消删除（BACK / 方向键）
             s_delete_mode = false;
             return;
         }
-        // 删除模式下忽略其他按键
-        return;
     }
 
     switch (key) {
         case BOARD_KEY_BACK:
-            // 短按返回主页，长按进入删除模式 (在tick中检测长按)
-            if (s_back_press_start == 0) {
-                s_back_press_start = board_time_ms();
-            } else {
-                // 短按释放 - 返回
-                ui_change_page(UI_STATE_MAIN);
-            }
+            // 短按：直接返回主页
+            ui_change_page(UI_STATE_MAIN);
+            return;
+
+        case BOARD_KEY_BACK_LONG:
+            // 长按：进入删除模式（动画提示，ENTER 确认，其他键取消）
+            ESP_LOGD(TAG, "Long press - entering delete mode");
+            s_delete_mode = true;
+            s_delete_anim_start = board_time_ms();
+            ui_show_toast("ENTER 确认删除", 2500);
             return;
             
         case BOARD_KEY_DOWN:
-            s_back_press_start = 0;
+        case BOARD_KEY_DOWN_REPEAT:
             if (idx < total - 1) {
                 idx++;
             } else {
@@ -224,7 +209,7 @@ static void on_key(board_key_t key) {
             return;
             
         case BOARD_KEY_UP:
-            s_back_press_start = 0;
+        case BOARD_KEY_UP_REPEAT:
             if (idx > 0) {
                 idx--;
             } else {
@@ -234,13 +219,11 @@ static void on_key(board_key_t key) {
             return;
             
         case BOARD_KEY_ENTER:
-            s_back_press_start = 0;
             // 进入消息详情页
             ui_change_page(UI_STATE_MESSAGE_READ);
             return;
             
         default:
-            s_back_press_start = 0;
             break;
     }
 }

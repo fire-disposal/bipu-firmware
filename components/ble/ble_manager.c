@@ -46,10 +46,27 @@ static bool check_binding_match(void);
 
 /* ================== 私有常量定义 ================== */
 
-/** Nordic UART Service UUIDs */
-#define NUS_SERVICE_UUID       0x0001
-#define NUS_TX_CHAR_UUID       0x0002  /**< 手机 -> 设备 (写) */
-#define NUS_RX_CHAR_UUID       0x0003  /**< 设备 -> 手机 (通知) */
+/** Nordic UART Service 标准 128-bit UUID
+ *
+ *  服务:  6e400001-b5a3-f393-e0a9-e50e24dcca9e
+ *  RX特征(手机→设备,写入): 6e400002-b5a3-f393-e0a9-e50e24dcca9e
+ *  TX特征(设备→手机,通知): 6e400003-b5a3-f393-e0a9-e50e24dcca9e
+ *
+ *  字节序：小端序（NimBLE 约定）
+ */
+static const ble_uuid128_t nus_svc_uuid = BLE_UUID128_INIT(
+    0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
+    0x93, 0xf3, 0xa3, 0xb5, 0x01, 0x00, 0x40, 0x6e);
+
+/** NUS RX 特征值：手机 -> 设备 (写入)，6e400002 */
+static const ble_uuid128_t nus_rx_char_uuid = BLE_UUID128_INIT(
+    0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
+    0x93, 0xf3, 0xa3, 0xb5, 0x02, 0x00, 0x40, 0x6e);
+
+/** NUS TX 特征值：设备 -> 手机 (通知)，6e400003 */
+static const ble_uuid128_t nus_tx_char_uuid = BLE_UUID128_INIT(
+    0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
+    0x93, 0xf3, 0xa3, 0xb5, 0x03, 0x00, 0x40, 0x6e);
 
 /** 设备名称 */
 #define DEVICE_NAME_PREFIX     "Bipupu_"
@@ -84,8 +101,10 @@ static ble_connection_callback_t s_connection_callback = NULL;
 static void handle_time_sync_directly(uint32_t timestamp);
 
 /** NUS 服务句柄 */
-static uint16_t s_nus_tx_char_handle;
-static uint16_t s_nus_rx_char_handle;
+/** NUS RX 特征句柄 (6e400002): 手机写入 → 设备接收 */
+static uint16_t s_nus_rx_val_handle;
+/** NUS TX 特征句柄 (6e400003): 设备通知 → 手机接收 */
+static uint16_t s_nus_tx_val_handle;
 
 /** 设备名称缓冲区 */
 static char s_device_name[32];
@@ -97,28 +116,30 @@ static void ble_on_reset(int reason);
 static void ble_on_sync(void);
 static int ble_gap_event(struct ble_gap_event *event, void *arg);
 static void ble_advertise(void);
-static int nus_tx_write_cb(uint16_t conn_handle, uint16_t attr_handle,
+static int nus_rx_write_cb(uint16_t conn_handle, uint16_t attr_handle,
                           struct ble_gatt_access_ctxt *ctxt, void *arg);
 
 /* ================== NUS 服务定义 ================== */
 
-/** NUS 服务定义 */
+/** NUS 服务定义（使用标准 128-bit UUID） */
 static const struct ble_gatt_svc_def nus_gatt_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
-        .uuid = BLE_UUID16_DECLARE(NUS_SERVICE_UUID),
+        .uuid = &nus_svc_uuid.u,
         .characteristics = (struct ble_gatt_chr_def[]) {
             {
-                .uuid = BLE_UUID16_DECLARE(NUS_TX_CHAR_UUID),
-                .access_cb = nus_tx_write_cb,
+                /* NUS RX: 手机→设备 写入特征值 (6e400002) */
+                .uuid = &nus_rx_char_uuid.u,
+                .access_cb = nus_rx_write_cb,
                 .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
-                .val_handle = &s_nus_tx_char_handle,
+                .val_handle = &s_nus_rx_val_handle,
             },
             {
-                .uuid = BLE_UUID16_DECLARE(NUS_RX_CHAR_UUID),
+                /* NUS TX: 设备→手机 通知特征值 (6e400003) */
+                .uuid = &nus_tx_char_uuid.u,
                 .access_cb = NULL,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
-                .val_handle = &s_nus_rx_char_handle,
+                .val_handle = &s_nus_tx_val_handle,
             },
             { 0 }  /* 结束标记 */
         }
@@ -169,7 +190,22 @@ static void handle_received_packet(const uint8_t* data, size_t length)
         s_error_count++;
         return;
     }
-    
+
+    /* ── 绑定安全校验 ─────────────────────────────────────────────
+     * 设备已绑定后，只接受来自绑定手机的协议包（绑定/解绑指令本身除外）。
+     * 防止附近陌生蓝牙设备恐恨地向存质器发送消息或修改时间。
+     */
+    if (s_is_bound) {
+        bipupu_message_type_t mt = packet.message_type;
+        bool is_bind_cmd = (mt == BIPUPU_MSG_BINDING_INFO ||
+                            mt == BIPUPU_MSG_UNBIND_COMMAND);
+        if (!is_bind_cmd && !check_binding_match()) {
+            ESP_LOGW(TAG, "拒绝来自非绑定设备的数据包 (type=0x%02X)", mt);
+            s_error_count++;
+            return;
+        }
+    }
+
     // 根据消息类型处理
     switch (packet.message_type) {
         case BIPUPU_MSG_TIME_SYNC:
@@ -185,11 +221,10 @@ static void handle_received_packet(const uint8_t* data, size_t length)
             break;
             
         case BIPUPU_MSG_TEXT:
-            ESP_LOGI(TAG, "收到文本消息: timestamp=%u, text=%s", 
-                    packet.timestamp, packet.text);
+            ESP_LOGI(TAG, "收到文本消息 [%s]: %s (ts=%u)",
+                    packet.sender_name, packet.body_text, packet.timestamp);
             if (s_message_callback) {
-                // 默认发送者为 "App"
-                s_message_callback("App", packet.text);
+                s_message_callback(packet.sender_name, packet.body_text, packet.timestamp);
             }
             break;
             
@@ -211,9 +246,9 @@ static void handle_received_packet(const uint8_t* data, size_t length)
 }
 
 /**
- * @brief NUS TX 特征值写回调
+ * @brief NUS RX 特征值写入回调（手机 → 设备）
  */
-static int nus_tx_write_cb(uint16_t conn_handle, uint16_t attr_handle,
+static int nus_rx_write_cb(uint16_t conn_handle, uint16_t attr_handle,
                           struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
     (void)conn_handle;
@@ -438,9 +473,9 @@ static bool check_binding_match(void)
 }
 
 /**
- * @brief 通过NUS RX特征发送数据
+ * @brief 通过 NUS TX 特征值向手机发送通知（设备 → 手机）
  */
-static esp_err_t send_data_via_nus_rx(const uint8_t* data, size_t length)
+static esp_err_t nus_tx_notify(const uint8_t* data, size_t length)
 {
     if (!s_ble_connected || s_conn_handle == 0xFFFF) {
         ESP_LOGW(TAG, "未连接，无法发送数据");
@@ -458,8 +493,8 @@ static esp_err_t send_data_via_nus_rx(const uint8_t* data, size_t length)
         return ESP_ERR_NO_MEM;
     }
     
-    // 发送通知
-    int rc = ble_gattc_notify_custom(s_conn_handle, s_nus_rx_char_handle, om);
+    // 通过 NUS TX 特征值（s_nus_tx_val_handle）向订阅的手机发送通知
+    int rc = ble_gattc_notify_custom(s_conn_handle, s_nus_tx_val_handle, om);
     if (rc != 0) {
         ESP_LOGE(TAG, "发送通知失败: %d", rc);
         os_mbuf_free_chain(om);
@@ -663,23 +698,12 @@ esp_err_t ble_manager_init(void)
     
     // 蓝牙管理器正在初始化
     s_ble_state = BLE_STATE_IDLE; // 临时设置为空闲状态
-    
-    // 初始化NVS
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS分区问题，尝试擦除并重新初始化");
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "NVS初始化失败: %s", esp_err_to_name(ret));
-        update_ble_state(BLE_STATE_ERROR);
-        return ret;
-    }
-    
+
+    // NVS 已由 main.c 的 init_nvs() 完成初始化，此处无需重复调用。
+    // 若在此处再次调用并触发擦除分支，将丢失已保存的绑定信息。
+
     // 初始化NimBLE
-    ret = esp_nimble_hci_init();
+    esp_err_t ret = esp_nimble_hci_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "NimBLE HCI初始化失败: %s", esp_err_to_name(ret));
         update_ble_state(BLE_STATE_ERROR);
@@ -896,7 +920,7 @@ esp_err_t ble_manager_send_text_message(const char* text, size_t text_length)
     }
     
     // 发送数据
-    esp_err_t ret = send_data_via_nus_rx(buffer, packet_length);
+    esp_err_t ret = nus_tx_notify(buffer, packet_length);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "发送文本消息失败");
         return ret;
@@ -919,7 +943,7 @@ esp_err_t ble_manager_send_time_sync_response(uint32_t timestamp)
     }
     
     // 发送数据
-    esp_err_t ret = send_data_via_nus_rx(buffer, packet_length);
+    esp_err_t ret = nus_tx_notify(buffer, packet_length);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "发送时间同步响应失败");
         return ret;
@@ -960,7 +984,7 @@ esp_err_t ble_manager_send_binding_info(const char* app_id, const char* user_nam
     }
     
     // 发送数据
-    esp_err_t ret = send_data_via_nus_rx(buffer, packet_length);
+    esp_err_t ret = nus_tx_notify(buffer, packet_length);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "发送绑定信息失败");
         return ret;
@@ -986,7 +1010,7 @@ esp_err_t ble_manager_send_unbind_confirm(void)
     }
     
     // 发送数据
-    esp_err_t ret = send_data_via_nus_rx(buffer, packet_length);
+    esp_err_t ret = nus_tx_notify(buffer, packet_length);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "发送解绑确认失败");
         return ret;

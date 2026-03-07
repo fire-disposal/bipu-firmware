@@ -59,7 +59,14 @@ typedef struct {
     uint8_t data[BIPUPU_MAX_DATA_LENGTH]; /**< 原始数据 */
     uint8_t checksum;                   /**< 接收到的校验和 */
     bool checksum_valid;                /**< 校验和是否有效 */
-    char text[BIPUPU_MAX_DATA_LENGTH + 1]; /**< UTF-8解码后的文本 (以null结尾) */
+    char text[BIPUPU_MAX_DATA_LENGTH + 1]; /**< UTF-8解码后的文本 (兼容字段，与 body_text 相同) */
+
+    /* ── TEXT 消息专属字段 ────────────────────────────────────────────────────
+     * data 字段布局: [1B: sender_len][sender UTF-8][body UTF-8]
+     * sender_len = 0 表示直接蓝牙发送，发送者固定为 "App"
+     */
+    char sender_name[65];                       /**< 发送者名称（已 UTF-8 解码） */
+    char body_text[BIPUPU_MAX_DATA_LENGTH + 1]; /**< 消息正文（已 UTF-8 解码，不含发送者前缀） */
 } bipupu_parsed_packet_t;
 
 /* ================== 协议解析接口 ================== */

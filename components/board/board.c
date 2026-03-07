@@ -22,11 +22,14 @@ esp_err_t board_init(void) {
   // 各模块初始化
   // 注意：部分模块可能依赖 I2C 或其他基础配置，需注意初始化顺序
 
-  // 1. 基础总线初始化
+  // 1. 基础总线初始化（若已由 main.c 提前完成则此处为幂等跳过）
+  bool i2c_was_new = (board_i2c_bus_handle == NULL);
   board_i2c_init();
-  
-  // 添加500ms延时，确保I2C总线稳定
-  vTaskDelay(pdMS_TO_TICKS(500));
+  if (i2c_was_new) {
+      /* 仅首次初始化时等待 I2C 总线上电稳定；
+       * 若已初始化（main.c 早期初始化路径），跳过延时避免浪费启动时间。 */
+      vTaskDelay(pdMS_TO_TICKS(10));
+  }
 
   // 2. 独立外设初始化
   board_vibrate_init(); // 包含 GPIO 初始化
@@ -34,11 +37,8 @@ esp_err_t board_init(void) {
   board_key_init();     // 包含 GPIO 初始化
   board_power_init();   // 电池 ADC 初始化
 
-  // 3. 依赖总线的外设初始化
-  board_display_init(); // 依赖 I2C
-  
-  // 添加500ms延时，确保显示屏初始化完成
-  vTaskDelay(pdMS_TO_TICKS(500));
+  // 3. 依赖总线的外设初始化（display_init 内部含 100ms 硬件复位序列）
+  board_display_init();
 
   ESP_LOGI(BOARD_TAG, "Board initialized successfully");
   return ESP_OK;

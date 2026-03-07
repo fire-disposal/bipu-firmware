@@ -1,624 +1,316 @@
-#include "board_pins.h"   // GPIO引脚定义
-#include "board.h"        // 公共接口
+#include "board_pins.h"
+#include "board.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
 
-/* ================== LED 状态机定义 ================== */
+/* =========================================================
+ * LED 状态机 v2 — 双层优先级架构
+ *
+ *  优先级（从高到低）：
+ *    FLASHLIGHT  → bool 标志，三灯全亮，完全覆盖其他层
+ *    FOREGROUND  → 一次性效果（短闪/双闪/通知），完成后自动退回背景
+ *    BACKGROUND  → 持久背景（广播跑马/慢闪/常灭）
+ *
+ *  设计特点：
+ *    - 描述符驱动：新增效果只需定义一个 led_anim_desc_t 常量
+ *    - 前景结束后自动续接背景，无需外部干预
+ *    - 单一互斥锁保护所有状态，thread-safe（NimBLE 任务可安全调用）
+ * ========================================================= */
+
+/* ── 效果描述符 ─────────────────────────────────────────── */
 
 typedef enum {
-    LED_SM_IDLE,            // 空闲状态
-    LED_SM_FLASHLIGHT,      // 手电筒常亮
-    LED_SM_SHORT_FLASH,     // 短闪一次
-    LED_SM_DOUBLE_FLASH,    // 快速闪动 2 次
-    LED_SM_CONTINUOUS_BLINK,// 持续闪灭
-    LED_SM_GALLOP,          // 三灯跑马
-} led_sm_state_t;
+    LED_ANIM_OFF,       /* 全灭（静态，layer_start 写 GPIO 后无需 tick） */
+    LED_ANIM_STATIC,    /* 全亮（静态，同上） */
+    LED_ANIM_BLINK,     /* on_ms 亮 → off_ms 灭，循环 count 次（0=永久） */
+    LED_ANIM_MARQUEE,   /* 三灯依次轮亮，on_ms 作为步进间隔 */
+} led_anim_type_t;
 
-/* ================== 配置常量 ================== */
-#define LED_SHORT_FLASH_ON_MS     150   // 短闪亮的时间
-#define LED_SHORT_FLASH_OFF_MS    100   // 短闪灭的时间
-#define LED_DOUBLE_FLASH_ON_MS    100   // 双闪每次亮的时间
-#define LED_DOUBLE_FLASH_GAP_MS   100   // 双闪间隔
-#define LED_DOUBLE_FLASH_CYCLE_MS 400   // 双闪一个周期 (亮 - 灭 - 亮 - 灭)
-#define LED_CONTINUOUS_INTERVAL_MS 200  // 持续闪灭间隔
-#define LED_GALLOP_INTERVAL_MS    150   // 跑马灯间隔
+typedef struct {
+    led_anim_type_t type;
+    uint32_t on_ms;   /* BLINK: 亮持续时间；MARQUEE: 步进间隔 */
+    uint32_t off_ms;  /* BLINK: 灭持续时间 */
+    uint8_t  count;   /* BLINK: 重复次数，0=永久 */
+} led_anim_desc_t;
 
-/* ================== 模块状态 ================== */
-static bool s_leds_initialized = false;
-static board_leds_t s_current_leds = {0, 0, 0};
-static SemaphoreHandle_t s_leds_mutex = NULL;
+/* ── 预设效果常量 ─────────────────────────────────────────── */
 
-// 状态机状态
-static led_sm_state_t s_sm_state = LED_SM_IDLE;
-static uint32_t s_sm_start_time = 0;
-static uint32_t s_sm_last_change = 0;
-static int s_sm_sub_state = 0;      // 子状态（用于多阶段效果）
-static int s_sm_blink_count = 0;    // 闪烁计数
-static int s_sm_gallop_index = 0;   // 跑马灯索引
+static const led_anim_desc_t ANIM_OFF           = {LED_ANIM_OFF,     0,   0,   0};
+static const led_anim_desc_t ANIM_STATIC        = {LED_ANIM_STATIC,  0,   0,   0};
+static const led_anim_desc_t ANIM_MARQUEE_300   = {LED_ANIM_MARQUEE, 300, 0,   0};
+static const led_anim_desc_t ANIM_BLINK_SLOW    = {LED_ANIM_BLINK,   500, 500, 0};
+static const led_anim_desc_t ANIM_BLINK_2_FAST  = {LED_ANIM_BLINK,   100, 100, 2};
+static const led_anim_desc_t ANIM_BLINK_2_MED   = {LED_ANIM_BLINK,   200, 200, 2};
 
-// LED 模式状态
-static board_led_mode_t s_led_mode = BOARD_LED_MODE_OFF;
-static uint32_t s_led_mode_last_change = 0;
-static int s_led_mode_sub_state = 0;
-static int s_led_mode_blink_count = 0;
-static int s_led_mode_marquee_index = 0;
+/* ── 层运行时状态 ─────────────────────────────────────────── */
 
-// BLE 自动指示器状态
-static bool s_ble_auto_indicator_enabled = false;
-static void (*s_ble_connected_callback)(bool connected) = NULL;
-static void (*s_ble_advertising_callback)(bool advertising) = NULL;
-static bool s_last_ble_connected = false;
-static bool s_last_ble_advertising = false;
+typedef struct {
+    led_anim_desc_t desc;    /* 当前效果参数副本 */
+    bool            active;  /* FG 专用：效果是否还在运行（BG 始终为 true） */
+    uint32_t        last_ms; /* 上次相位切换时间戳 */
+    int             phase;   /* 当前相位（偶=亮, 奇=灭；MARQUEE=LED 索引） */
+} led_layer_t;
 
-/* ================== 内部辅助函数 ================== */
+/* ── 模块状态 ─────────────────────────────────────────────── */
 
-// 安全获取互斥锁
-static inline bool leds_lock(void) {
-    if (s_leds_mutex == NULL) return true;
-    return xSemaphoreTake(s_leds_mutex, pdMS_TO_TICKS(100)) == pdTRUE;
+static bool              s_initialized = false;
+static SemaphoreHandle_t s_mutex       = NULL;
+static bool              s_flashlight  = false;  /* 最高优先级覆盖 */
+static led_layer_t       s_bg          = {0};    /* 背景层（持久） */
+static led_layer_t       s_fg          = {0};    /* 前景层（一次性） */
+
+/* ── GPIO 辅助 ─────────────────────────────────────────────── */
+
+static const board_leds_t ALL_ON  = {255, 255, 255};
+static const board_leds_t ALL_OFF = {0,   0,   0  };
+
+static void gpio_write(board_leds_t leds) {
+    gpio_set_level(BOARD_GPIO_LED_1, leds.led1 > 0 ? 1 : 0);
+    gpio_set_level(BOARD_GPIO_LED_2, leds.led2 > 0 ? 1 : 0);
+    gpio_set_level(BOARD_GPIO_LED_3, leds.led3 > 0 ? 1 : 0);
 }
 
-// 安全释放互斥锁
+static board_leds_t marquee_leds(int idx) {
+    board_leds_t l = {0, 0, 0};
+    switch (idx % 3) {
+        case 0: l.led1 = 255; break;
+        case 1: l.led2 = 255; break;
+        default: l.led3 = 255; break;
+    }
+    return l;
+}
+
+static inline bool leds_lock(void) {
+    if (!s_mutex) return true;
+    return xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) == pdTRUE;
+}
 static inline void leds_unlock(void) {
-    if (s_leds_mutex != NULL) {
-        xSemaphoreGive(s_leds_mutex);
+    if (s_mutex) xSemaphoreGive(s_mutex);
+}
+
+/* ── 层启动：初始化运行时状态并输出第一帧 GPIO ─────────────── */
+
+static void layer_start(led_layer_t *layer, led_anim_desc_t desc) {
+    layer->desc    = desc;
+    layer->active  = true;
+    layer->last_ms = board_time_ms();
+    layer->phase   = 0;
+    switch (desc.type) {
+        case LED_ANIM_OFF:     gpio_write(ALL_OFF);          break;
+        case LED_ANIM_STATIC:  gpio_write(ALL_ON);           break;
+        case LED_ANIM_BLINK:   gpio_write(ALL_ON);           break; /* 从亮相开始 */
+        case LED_ANIM_MARQUEE: gpio_write(marquee_leds(0));  break;
     }
 }
 
-/* ================== LED 模式处理函数声明 ================== */
-static void process_led_mode(void);
-static void update_ble_led_indicator(void);
+/* ── 层 tick：推进一步动画，返回 false 表示一次性效果已完成 ── */
 
-// 直接设置 GPIO（不经过状态机）
-static void leds_set_raw(board_leds_t leds) {
-    gpio_set_level(BOARD_GPIO_LED_1, leds.led1 > 127 ? 1 : 0);
-    gpio_set_level(BOARD_GPIO_LED_2, leds.led2 > 127 ? 1 : 0);
-    gpio_set_level(BOARD_GPIO_LED_3, leds.led3 > 127 ? 1 : 0);
-    s_current_leds = leds;
+static bool layer_tick(led_layer_t *layer) {
+    if (!layer->active) return false;
+
+    const led_anim_desc_t *d = &layer->desc;
+
+    /* 静态效果无需周期切换，直接返回（GPIO 在 layer_start 中已设置） */
+    if (d->type == LED_ANIM_OFF || d->type == LED_ANIM_STATIC) {
+        return true;
+    }
+
+    uint32_t now = board_time_ms();
+
+    if (d->type == LED_ANIM_BLINK) {
+        /* 进入前检查是否已达到目标次数（防止 count 外部变更导致越界） */
+        if (d->count > 0 && layer->phase >= (int)(2 * d->count)) {
+            gpio_write(ALL_OFF);
+            layer->active = false;
+            return false;
+        }
+        uint32_t interval = (layer->phase % 2 == 0) ? d->on_ms : d->off_ms;
+        if (now - layer->last_ms >= interval) {
+            layer->last_ms = now;
+            layer->phase++;
+            if (d->count > 0 && layer->phase >= (int)(2 * d->count)) {
+                gpio_write(ALL_OFF);
+                layer->active = false;
+                return false;
+            }
+            gpio_write((layer->phase % 2 == 0) ? ALL_ON : ALL_OFF);
+        }
+        return true;
+    }
+
+    if (d->type == LED_ANIM_MARQUEE) {
+        if (now - layer->last_ms >= d->on_ms) {
+            layer->last_ms = now;
+            layer->phase   = (layer->phase + 1) % 3;
+            gpio_write(marquee_leds(layer->phase));
+        }
+        return true;
+    }
+
+    return true;
 }
 
-// 设置状态机为空闲
-static void sm_set_idle(void) {
-    s_sm_state = LED_SM_IDLE;
-    s_sm_start_time = 0;
-    s_sm_last_change = 0;
-    s_sm_sub_state = 0;
-    s_sm_blink_count = 0;
-    s_sm_gallop_index = 0;
-}
-
-/* ================== 公开 API 实现 ================== */
+/* =========================================================
+ * 公开 API
+ * ========================================================= */
 
 void board_leds_init(void) {
-    if (s_leds_initialized) {
-        ESP_LOGW(BOARD_TAG, "LEDs already initialized");
-        return;
-    }
+    if (s_initialized) return;
 
-    // 创建互斥锁
-    s_leds_mutex = xSemaphoreCreateMutex();
-    if (s_leds_mutex == NULL) {
-        ESP_LOGE(BOARD_TAG, "Failed to create LED mutex");
-    }
+    s_mutex = xSemaphoreCreateMutex();
 
-    // 接管引脚（避免上电默认电平）
     gpio_reset_pin(BOARD_GPIO_LED_1);
     gpio_reset_pin(BOARD_GPIO_LED_2);
     gpio_reset_pin(BOARD_GPIO_LED_3);
 
-    // 配置 LED GPIO 为输出
-    gpio_config_t led_config = {
-        .pin_bit_mask = (1ULL << BOARD_GPIO_LED_1) | (1ULL << BOARD_GPIO_LED_2) |
+    const gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << BOARD_GPIO_LED_1) |
+                        (1ULL << BOARD_GPIO_LED_2) |
                         (1ULL << BOARD_GPIO_LED_3),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
     };
-    
-    esp_err_t ret = gpio_config(&led_config);
-    if (ret != ESP_OK) {
-        ESP_LOGE(BOARD_TAG, "LED GPIO config failed: %s", esp_err_to_name(ret));
-        return;
-    }
+    gpio_config(&cfg);
+    gpio_write(ALL_OFF);
 
-    // 立即熄灭
-    leds_set_raw((board_leds_t){0, 0, 0});
-    
-    s_leds_initialized = true;
-    sm_set_idle();
-    ESP_LOGI(BOARD_TAG, "LEDs initialized (GPIO)");
+    layer_start(&s_bg, ANIM_OFF);
+    s_fg.active  = false;
+    s_flashlight = false;
+
+    s_initialized = true;
+    ESP_LOGI(BOARD_TAG, "LEDs initialized (dual-layer v2)");
 }
 
-void board_leds_set(board_leds_t leds) {
-    if (!s_leds_initialized) {
-        ESP_LOGW(BOARD_TAG, "LEDs not initialized");
+/* board_leds_tick：在 app_loop 中每 10ms 调用一次 */
+void board_leds_tick(void) {
+    if (!s_initialized) return;
+    if (!leds_lock()) return;
+
+    if (s_flashlight) {
+        gpio_write(ALL_ON);
+        leds_unlock();
         return;
     }
 
-    if (!leds_lock()) {
-        ESP_LOGW(BOARD_TAG, "Failed to acquire LED lock");
-        return;
-    }
-
-    // 如果当前是手电筒模式，直接设置并返回（手电筒优先级最高）
-    if (s_sm_state == LED_SM_FLASHLIGHT) {
-        leds_set_raw(leds);
+    if (s_fg.active) {
+        bool still_running = layer_tick(&s_fg);
+        if (!still_running) {
+            /* 前景完成 → 重播背景，恢复背景 LED 输出 */
+            layer_start(&s_bg, s_bg.desc);
+        }
     } else {
-        // 其他模式下，设置当前状态但可能被状态机覆盖
-        leds_set_raw(leds);
+        layer_tick(&s_bg);
     }
-    
+
     leds_unlock();
 }
 
-void board_leds_off(void) {
-    if (!s_leds_initialized) {
-        return;
+/* board_leds_set_mode：统一模式入口，兼容现有调用方 */
+void board_leds_set_mode(board_led_mode_t mode) {
+    if (!s_initialized) return;
+    if (!leds_lock()) return;
+
+    led_anim_desc_t desc;
+    bool is_oneshot;  /* true=前景一次性；false=背景持久 */
+
+    switch (mode) {
+        case BOARD_LED_MODE_OFF:
+            desc = ANIM_OFF;          is_oneshot = false; break;
+        case BOARD_LED_MODE_STATIC:
+            desc = ANIM_STATIC;       is_oneshot = false; break;
+        case BOARD_LED_MODE_ADVERTISING:
+        case BOARD_LED_MODE_MARQUEE:
+            desc = ANIM_MARQUEE_300;  is_oneshot = false; break;
+        case BOARD_LED_MODE_BLINK:
+            desc = ANIM_BLINK_SLOW;   is_oneshot = false; break;
+        /* 一次性效果：完成后自动回到当前背景 */
+        case BOARD_LED_MODE_CONNECTED:
+            desc = ANIM_BLINK_2_MED;  is_oneshot = true;  break;
+        case BOARD_LED_MODE_NOTIFY_FLASH:
+            desc = ANIM_BLINK_2_FAST; is_oneshot = true;  break;
+        default:
+            desc = ANIM_OFF; is_oneshot = false; break;
     }
 
-    if (!leds_lock()) {
-        ESP_LOGW(BOARD_TAG, "Failed to acquire LED lock");
-        return;
+    if (is_oneshot) {
+        /* 前景一次性：不修改背景，覆盖在背景之上 */
+        layer_start(&s_fg, desc);
+    } else {
+        /* 背景变更：清除前景，立即切换背景 */
+        s_fg.active = false;
+        layer_start(&s_bg, desc);
     }
 
-    // 手电筒模式下不关闭
-    if (s_sm_state != LED_SM_FLASHLIGHT) {
-        leds_set_raw((board_leds_t){0, 0, 0});
-    }
-    
     leds_unlock();
+    ESP_LOGD(BOARD_TAG, "LED mode=%d oneshot=%d", mode, is_oneshot);
 }
-
-board_leds_t board_leds_get_state(void) {
-    return s_current_leds;
-}
-
-bool board_leds_is_initialized(void) {
-    return s_leds_initialized;
-}
-
-/* ================== LED 状态机控制 API ================== */
 
 void board_leds_flashlight_on(void) {
-    if (!s_leds_initialized) return;
-    
+    if (!s_initialized) return;
     if (!leds_lock()) return;
-    
-    s_sm_state = LED_SM_FLASHLIGHT;
-    s_sm_start_time = board_time_ms();
-    // 手电筒：三灯全亮
-    leds_set_raw((board_leds_t){255, 255, 255});
-    
+    s_flashlight = true;
+    gpio_write(ALL_ON);
     leds_unlock();
     ESP_LOGD(BOARD_TAG, "Flashlight ON");
 }
 
 void board_leds_flashlight_off(void) {
-    if (!s_leds_initialized) return;
-    
+    if (!s_initialized) return;
     if (!leds_lock()) return;
-    
-    if (s_sm_state == LED_SM_FLASHLIGHT) {
-        sm_set_idle();
-        leds_set_raw((board_leds_t){0, 0, 0});
-        ESP_LOGD(BOARD_TAG, "Flashlight OFF");
+    s_flashlight = false;
+    /* 恢复输出：前景仍活跃则下次 tick 处理，否则重播背景 */
+    if (!s_fg.active) {
+        layer_start(&s_bg, s_bg.desc);
     }
-    
+    leds_unlock();
+    ESP_LOGD(BOARD_TAG, "Flashlight OFF");
+}
+
+bool board_leds_is_flashlight_on(void) { return s_flashlight; }
+
+void board_leds_off(void) {
+    if (!s_initialized) return;
+    if (!leds_lock()) return;
+    s_flashlight = false;
+    s_fg.active  = false;
+    layer_start(&s_bg, ANIM_OFF);
     leds_unlock();
 }
 
-bool board_leds_is_flashlight_on(void) {
-    return s_sm_state == LED_SM_FLASHLIGHT;
-}
-
-void board_leds_short_flash(void) {
-    if (!s_leds_initialized) return;
-    
-    if (!leds_lock()) return;
-    
-    // 中断当前非手电筒状态
-    if (s_sm_state != LED_SM_FLASHLIGHT) {
-        s_sm_state = LED_SM_SHORT_FLASH;
-        s_sm_start_time = board_time_ms();
-        s_sm_last_change = board_time_ms();
-        s_sm_sub_state = 0;  // 0=亮
-        leds_set_raw((board_leds_t){255, 255, 255});
-        ESP_LOGD(BOARD_TAG, "Short flash started");
-    }
-    
-    leds_unlock();
-}
-
-void board_leds_double_flash(void) {
-    if (!s_leds_initialized) return;
-    
-    if (!leds_lock()) return;
-    
-    if (s_sm_state != LED_SM_FLASHLIGHT) {
-        s_sm_state = LED_SM_DOUBLE_FLASH;
-        s_sm_start_time = board_time_ms();
-        s_sm_last_change = board_time_ms();
-        s_sm_sub_state = 0;  // 0=第一次亮
-        s_sm_blink_count = 0;
-        leds_set_raw((board_leds_t){255, 255, 255});
-        ESP_LOGD(BOARD_TAG, "Double flash started");
-    }
-    
-    leds_unlock();
-}
-
-void board_leds_continuous_blink_start(void) {
-    if (!s_leds_initialized) return;
-    
-    if (!leds_lock()) return;
-    
-    if (s_sm_state != LED_SM_FLASHLIGHT) {
-        s_sm_state = LED_SM_CONTINUOUS_BLINK;
-        s_sm_start_time = board_time_ms();
-        s_sm_last_change = board_time_ms();
-        s_sm_sub_state = 0;  // 0=亮
-        leds_set_raw((board_leds_t){255, 255, 255});
-        ESP_LOGD(BOARD_TAG, "Continuous blink started");
-    }
-    
-    leds_unlock();
-}
-
-void board_leds_continuous_blink_stop(void) {
-    if (!s_leds_initialized) return;
-    
-    if (!leds_lock()) return;
-    
-    if (s_sm_state == LED_SM_CONTINUOUS_BLINK) {
-        sm_set_idle();
-        leds_set_raw((board_leds_t){0, 0, 0});
-        ESP_LOGD(BOARD_TAG, "Continuous blink stopped");
-    }
-    
-    leds_unlock();
-}
-
-void board_leds_gallop_start(void) {
-    if (!s_leds_initialized) return;
-    
-    if (!leds_lock()) return;
-    
-    if (s_sm_state != LED_SM_FLASHLIGHT) {
-        s_sm_state = LED_SM_GALLOP;
-        s_sm_start_time = board_time_ms();
-        s_sm_last_change = board_time_ms();
-        s_sm_gallop_index = 0;
-        // 点亮第一个灯
-        leds_set_raw((board_leds_t){255, 0, 0});
-        ESP_LOGD(BOARD_TAG, "Gallop started");
-    }
-    
-    leds_unlock();
-}
-
-void board_leds_gallop_stop(void) {
-    if (!s_leds_initialized) return;
-    
-    if (!leds_lock()) return;
-    
-    if (s_sm_state == LED_SM_GALLOP) {
-        sm_set_idle();
-        leds_set_raw((board_leds_t){0, 0, 0});
-        ESP_LOGD(BOARD_TAG, "Gallop stopped");
-    }
-    
-    leds_unlock();
-}
-
-/* ================== LED 状态机轮询 ================== */
-void board_leds_tick(void) {
-    if (!s_leds_initialized) {
-        return;
-    }
-    
-    // 处理 LED 模式
-    process_led_mode();
-    
-    // 处理状态机
-    if (s_sm_state == LED_SM_IDLE) {
-        return;
-    }
-
-    uint32_t now = board_time_ms();
-
-    switch (s_sm_state) {
-        case LED_SM_FLASHLIGHT:
-            // 手电筒保持常亮，无需处理
-            break;
-
-        case LED_SM_SHORT_FLASH: {
-            // 短闪一次：亮 150ms -> 灭 100ms -> 结束
-            if (s_sm_sub_state == 0) {
-                // 亮状态
-                if (now - s_sm_last_change >= LED_SHORT_FLASH_ON_MS) {
-                    s_sm_sub_state = 1;
-                    s_sm_last_change = now;
-                    leds_set_raw((board_leds_t){0, 0, 0});
-                }
-            } else {
-                // 灭状态
-                if (now - s_sm_last_change >= LED_SHORT_FLASH_OFF_MS) {
-                    sm_set_idle();
-                    ESP_LOGD(BOARD_TAG, "Short flash completed");
-                }
-            }
-            break;
-        }
-
-        case LED_SM_DOUBLE_FLASH: {
-            // 快速闪动 2 次：亮 100ms -> 灭 100ms -> 亮 100ms -> 灭 100ms -> 结束
-            if (s_sm_blink_count < 4) {  // 4 个半周期
-                if (now - s_sm_last_change >= LED_DOUBLE_FLASH_ON_MS) {
-                    s_sm_last_change = now;
-                    if (s_sm_blink_count % 2 == 0) {
-                        // 灭
-                        leds_set_raw((board_leds_t){0, 0, 0});
-                    } else {
-                        // 亮
-                        leds_set_raw((board_leds_t){255, 255, 255});
-                    }
-                    s_sm_blink_count++;
-                }
-            } else {
-                sm_set_idle();
-                ESP_LOGD(BOARD_TAG, "Double flash completed");
-            }
-            break;
-        }
-
-        case LED_SM_CONTINUOUS_BLINK: {
-            // 持续闪灭：每 200ms 切换状态
-            if (now - s_sm_last_change >= LED_CONTINUOUS_INTERVAL_MS) {
-                s_sm_last_change = now;
-                s_sm_sub_state = !s_sm_sub_state;
-                if (s_sm_sub_state) {
-                    leds_set_raw((board_leds_t){255, 255, 255});
-                } else {
-                    leds_set_raw((board_leds_t){0, 0, 0});
-                }
-            }
-            break;
-        }
-
-        case LED_SM_GALLOP: {
-            // 三灯跑马：LED1 -> LED2 -> LED3 -> 循环
-            if (now - s_sm_last_change >= LED_GALLOP_INTERVAL_MS) {
-                s_sm_last_change = now;
-                s_sm_gallop_index = (s_sm_gallop_index + 1) % 3;
-                
-                board_leds_t leds = {0, 0, 0};
-                if (s_sm_gallop_index == 0) leds.led1 = 255;
-                else if (s_sm_gallop_index == 1) leds.led2 = 255;
-                else if (s_sm_gallop_index == 2) leds.led3 = 255;
-                leds_set_raw(leds);
-            }
-            break;
-        }
-
-        default:
-            sm_set_idle();
-            break;
-    }
-}
-
-/* ================== BLE-LED 自动指示器 ================== */
-
-void board_leds_enable_ble_auto_indicator(bool enable) {
-    if (!s_leds_initialized) return;
-    
-    s_ble_auto_indicator_enabled = enable;
-    s_last_ble_connected = false;
-    s_last_ble_advertising = false;
-    
-    if (!enable) {
-        // 禁用时恢复默认 LED 模式
-        board_leds_set_mode(BOARD_LED_MODE_OFF);
-    }
-    
-    ESP_LOGD(BOARD_TAG, "BLE auto LED indicator %s", enable ? "enabled" : "disabled");
-}
-
-void board_leds_set_ble_state_callbacks(
-    void (*connected_callback)(bool connected),
-    void (*advertising_callback)(bool advertising)
-) {
-    s_ble_connected_callback = connected_callback;
-    s_ble_advertising_callback = advertising_callback;
-    ESP_LOGD(BOARD_TAG, "BLE state callbacks set");
-}
-
-static void update_ble_led_indicator(void) {
-    if (!s_ble_auto_indicator_enabled) {
-        return;
-    }
-    
-    // 这里需要从外部获取 BLE 状态
-    // 在实际使用中，这些状态应该通过回调函数传递
-    // 暂时留空，由应用层调用 board_leds_set_mode 直接设置
-    
-    // 优先级处理：手电筒优先，不应被常规 LED 状态覆盖
-    if (board_leds_is_flashlight_on()) {
-        return; // UI 已直接控制 LED（手电筒），保持当前状态
-    }
-    if (board_leds_is_active()) {
-        return; // LED 状态机正在运行（如跑马、闪烁等），保持当前状态
-    }
-}
-
-/* ================== LED 模式处理 ================== */
-
-void board_leds_set_mode(board_led_mode_t mode) {
-    if (!s_leds_initialized) return;
-    
-    if (!leds_lock()) return;
-    
-    // 如果新模式与当前模式相同，不做任何操作
-    if (s_led_mode == mode) {
-        xSemaphoreGive(s_leds_mutex);
-        return;
-    }
-    
-    // 停止当前状态机
-    sm_set_idle();
-    
-    // 设置新模式
-    s_led_mode = mode;
-    s_led_mode_last_change = board_time_ms();
-    s_led_mode_sub_state = 0;
-    s_led_mode_blink_count = 0;
-    s_led_mode_marquee_index = 0;
-    
-    // 根据模式设置初始状态
-    switch (mode) {
-        case BOARD_LED_MODE_OFF:
-            leds_set_raw((board_leds_t){0, 0, 0});
-            break;
-        case BOARD_LED_MODE_STATIC:
-            leds_set_raw((board_leds_t){255, 255, 255});
-            break;
-        case BOARD_LED_MODE_ADVERTISING:
-            // 广播跑马灯：从 LED1 开始
-            s_led_mode_marquee_index = 0;
-            board_leds_t adv_leds = {0, 0, 0};
-            adv_leds.led1 = 255;
-            leds_set_raw(adv_leds);
-            break;
-        case BOARD_LED_MODE_CONNECTED:
-            // 连接闪烁：开始第一次闪烁
-            s_led_mode_blink_count = 0;
-            leds_set_raw((board_leds_t){255, 255, 255});
-            break;
-        case BOARD_LED_MODE_MARQUEE:
-            // 通用跑马灯：从 LED1 开始
-            s_led_mode_marquee_index = 0;
-            board_leds_t marquee_leds = {0, 0, 0};
-            marquee_leds.led1 = 255;
-            leds_set_raw(marquee_leds);
-            break;
-        case BOARD_LED_MODE_BLINK:
-            // 通用闪烁：开始闪烁
-            s_led_mode_sub_state = 1; // 亮状态
-            leds_set_raw((board_leds_t){255, 255, 255});
-            break;
-        case BOARD_LED_MODE_NOTIFY_FLASH:
-            // 通知闪烁：快速闪两次
-            s_led_mode_blink_count = 0;
-            leds_set_raw((board_leds_t){255, 255, 255});
-            break;
-        default:
-            leds_set_raw((board_leds_t){0, 0, 0});
-            break;
-    }
-    
-    ESP_LOGD(BOARD_TAG, "LED mode changed to %d", mode);
-    xSemaphoreGive(s_leds_mutex);
-}
-
-static void process_led_mode(void) {
-    // 先处理 BLE 自动指示器
-    update_ble_led_indicator();
-    
-    if (s_led_mode == BOARD_LED_MODE_OFF || s_led_mode == BOARD_LED_MODE_STATIC) {
-        return; // 静态模式无需处理
-    }
-    
-    uint32_t now = board_time_ms();
-    
-    switch (s_led_mode) {
-        case BOARD_LED_MODE_ADVERTISING:
-        case BOARD_LED_MODE_MARQUEE: {
-            // 跑马灯：每 300ms 切换一次 LED
-            if (now - s_led_mode_last_change >= 300) {
-                s_led_mode_last_change = now;
-                s_led_mode_marquee_index = (s_led_mode_marquee_index + 1) % 3;
-                
-                board_leds_t leds = {0, 0, 0};
-                if (s_led_mode_marquee_index == 0) leds.led1 = 255;
-                else if (s_led_mode_marquee_index == 1) leds.led2 = 255;
-                else if (s_led_mode_marquee_index == 2) leds.led3 = 255;
-                leds_set_raw(leds);
-            }
-            break;
-        }
-        
-        case BOARD_LED_MODE_CONNECTED: {
-            // 连接闪烁：闪烁两次，每次亮 200ms，灭 200ms
-            if (s_led_mode_blink_count < 4) { // 总共 4 个半周期（亮 - 灭 - 亮 - 灭）
-                if (now - s_led_mode_last_change >= 200) {
-                    s_led_mode_last_change = now;
-                    board_leds_t leds = {0, 0, 0};
-                    if (s_led_mode_blink_count % 2 == 0) {
-                        // 亮
-                        leds.led1 = leds.led2 = leds.led3 = 255;
-                    } else {
-                        // 灭
-                        leds.led1 = leds.led2 = leds.led3 = 0;
-                    }
-                    leds_set_raw(leds);
-                    s_led_mode_blink_count++;
-                }
-            } else {
-                // 闪烁完成，熄灭并进入 OFF 状态
-                leds_set_raw((board_leds_t){0, 0, 0});
-                s_led_mode = BOARD_LED_MODE_OFF;
-            }
-            break;
-        }
-        
-        case BOARD_LED_MODE_BLINK: {
-            // 通用闪烁：每 500ms 切换状态
-            if (now - s_led_mode_last_change >= 500) {
-                s_led_mode_last_change = now;
-                s_led_mode_sub_state = !s_led_mode_sub_state;
-                if (s_led_mode_sub_state) {
-                    leds_set_raw((board_leds_t){255, 255, 255});
-                } else {
-                    leds_set_raw((board_leds_t){0, 0, 0});
-                }
-            }
-            break;
-        }
-        
-        case BOARD_LED_MODE_NOTIFY_FLASH: {
-            // 通知闪烁：快速闪两次，亮 100ms，灭 100ms
-            if (s_led_mode_blink_count < 4) { // 4 个半周期
-                if (now - s_led_mode_last_change >= 100) {
-                    s_led_mode_last_change = now;
-                    board_leds_t leds = {0, 0, 0};
-                    if (s_led_mode_blink_count % 2 == 0) {
-                        // 亮
-                        leds.led1 = leds.led2 = leds.led3 = 255;
-                    } else {
-                        // 灭
-                        leds.led1 = leds.led2 = leds.led3 = 0;
-                    }
-                    leds_set_raw(leds);
-                    s_led_mode_blink_count++;
-                }
-            } else {
-                // 闪烁完成，熄灭
-                leds_set_raw((board_leds_t){0, 0, 0});
-                s_led_mode = BOARD_LED_MODE_OFF;
-            }
-            break;
-        }
-        
-        default:
-            break;
-    }
-}
-
-/* ================== 状态查询 ================== */
 bool board_leds_is_active(void) {
-    return s_sm_state != LED_SM_IDLE || s_led_mode != BOARD_LED_MODE_OFF;
+    return s_flashlight ||
+           s_fg.active  ||
+           (s_bg.desc.type != LED_ANIM_OFF);
 }
+
+bool board_leds_is_initialized(void) { return s_initialized; }
+
+/* ── 遗留 API 兼容包装（签名不变，内部转发至新状态机） ─── */
+
+void board_leds_set(board_leds_t leds) {
+    if (!s_initialized) return;
+    if (!leds_lock()) return;
+    if (!s_flashlight) gpio_write(leds);
+    leds_unlock();
+}
+
+board_leds_t board_leds_get_state(void) {
+    return s_flashlight ? ALL_ON : ALL_OFF;
+}
+
+void board_leds_short_flash(void)            { board_leds_set_mode(BOARD_LED_MODE_NOTIFY_FLASH); }
+void board_leds_double_flash(void)           { board_leds_set_mode(BOARD_LED_MODE_NOTIFY_FLASH); }
+void board_leds_continuous_blink_start(void) { board_leds_set_mode(BOARD_LED_MODE_BLINK);        }
+void board_leds_continuous_blink_stop(void)  { board_leds_set_mode(BOARD_LED_MODE_OFF);          }
+void board_leds_gallop_start(void)           { board_leds_set_mode(BOARD_LED_MODE_MARQUEE);      }
+void board_leds_gallop_stop(void)            { board_leds_set_mode(BOARD_LED_MODE_OFF);          }
+void board_leds_enable_ble_auto_indicator(bool enable) { (void)enable; }
+void board_leds_set_ble_state_callbacks(
+    void (*cc)(bool connected), void (*ac)(bool adv)) { (void)cc; (void)ac; }

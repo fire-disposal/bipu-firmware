@@ -67,6 +67,34 @@ void ui_set_brightness(uint8_t level);
 /* ================== 系统控制接口 ================== */
 void ui_system_restart(void);
 
+/**
+ * @brief 刷新待执行的延迟 NVS 持久化操作
+ *
+ * ui_delete_current_message() 和 ui_set_brightness() 在 ui_on_key() 持锁时
+ * 被调用，不能在锁内直接写 NVS（约 10-50ms）。它们会将待写数据快照到模块变量，
+ * 然后由 app_loop() 在无锁状态下调用此函数完成实际写入。
+ *
+ * 必须在 app_task 上下文中、非锁内调用。
+ */
+void ui_flush_pending_saves(void);
+
+/* ================== Toast / HUD 接口 ================== */
+/**
+ * @brief 在屏幕中央弹出文字提示（类 Android Toast）
+ *
+ * 任意按键可立即消除。提示覆盖在当前页面之上，不切换页面。
+ *
+ * @param msg          显示文本（最多 63 个字节，支持中英文）
+ * @param auto_dismiss_ms 自动消失时间 ms，0 = 不自动消失（仅靠按键消除）
+ */
+void ui_show_toast(const char *msg, uint32_t auto_dismiss_ms);
+
+/** @brief 当前是否有 Toast 正在显示 */
+bool ui_toast_is_visible(void);
+
+/** @brief 立即关闭 Toast（由按键或外部逻辑调用） */
+void ui_toast_dismiss(void);
+
 #ifdef __cplusplus
 }
 #endif

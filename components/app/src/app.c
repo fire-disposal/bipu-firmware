@@ -1,5 +1,4 @@
 #include "app.h"
-#include "app_battery.h"
 #include "app_ble.h"
 #include "board.h"
 #include "ble_manager.h"
@@ -78,6 +77,9 @@ esp_err_t app_init(void)
     } else {
         ESP_LOGI(APP_TAG, "BLE 初始化成功");
 
+        // 初始化 BLE 应用层消息队列（必须在注册回调前完成）
+        app_ble_init();
+
         // 设置回调
         ble_manager_set_message_callback(ble_message_received);
         ble_manager_set_connection_callback(ble_connection_changed);
@@ -90,10 +92,7 @@ esp_err_t app_init(void)
     // main.c 不再单独调用 ui_init，统一在此处调用一次。
     ui_init();
 
-    // 3. 电池监控初始化（后台定时器）
-    app_battery_init();
-
-    // 4. 创建 GUI 任务（双核芯片绑 Core 1 避让 BLE，单核芯片绑 Core 0）
+    // 3. 创建 GUI 任务（双核芯片绑 Core 1 避让 BLE，单核芯片绑 Core 0）
     BaseType_t gui_ret = xTaskCreatePinnedToCore(
         gui_task,
         "gui_task",
@@ -142,10 +141,18 @@ void app_loop(void)
         ui_on_key(key);
     }
 
-    // 2. 震动马达状态更新：始终高频（定时器精度需要）
+    // 2. BLE 消息事件处理：排空队列（NimBLE 任务投递的消息在此被消费）
+    //    必须在 app_task 上下文调用，不能在 NimBLE 任务中直接执行 UI/NVS 操作
+    app_ble_process_pending();
+
+    // 3. 延迟 NVS 持久化：将 ui_delete_current_message / ui_set_brightness 推迟的
+    //    Flash 写入在此处执行（锁外，不阻塞 GUI 任务或按键响应）
+    ui_flush_pending_saves();
+
+    // 3. 震动马达状态更新：始终高频（定时器精度需要）
     board_vibrate_tick();
 
-    // 3. LED 状态机轮询：高频调用以保证动画流畅
+    // 4. LED 状态机轮询：高频调用以保证动画流畅
     board_leds_tick();
 
     // 4. 以下非关键路径每 200ms 执行一次（5Hz）

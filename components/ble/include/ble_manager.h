@@ -22,7 +22,7 @@ extern "C" {
 /** 蓝牙管理器状态 */
 typedef enum {
     BLE_STATE_UNINITIALIZED = 0,  /**< 未初始化 */
-    BLE_STATE_INITIALIZED,        /**< 已初始化 */
+    BLE_STATE_IDLE,               /**< 已初始化，空闲（未广播） */
     BLE_STATE_ADVERTISING,        /**< 正在广播 */
     BLE_STATE_CONNECTED,          /**< 已连接 */
     BLE_STATE_ERROR               /**< 错误状态 */
@@ -168,6 +168,40 @@ esp_err_t ble_manager_send_text_message(const char* text, size_t text_length);
  * @return esp_err_t ESP_OK 成功，其他值失败
  */
 esp_err_t ble_manager_send_time_sync_response(uint32_t timestamp);
+
+/**
+ * @brief 初始化并启动蓝牙 NimBLE 堆栈（替代手动初始化流程）
+ */
+void ble_manager_start(void);
+
+/**
+ * @brief 强制清除所有绑定信息并断开连接（用于本地按键解绑）
+ */
+void ble_manager_force_reset_bonds(void);
+
+/**
+ * @brief 发送绑定信息到手机
+ * @param app_id 应用ID
+ * @param user_name 用户名
+ * @return esp_err_t ESP_OK 成功，其他值失败
+ */
+esp_err_t ble_manager_send_binding_info(const char* app_id, const char* user_name);
+
+/**
+ * @brief 发送解绑确认到手机
+ * @return esp_err_t ESP_OK 成功，其他值失败
+ */
+esp_err_t ble_manager_send_unbind_confirm(void);
+
+/**
+ * @brief 清理蓝牙管理器资源
+ */
+void ble_manager_cleanup(void);
+
+/**
+ * @brief 全局连接状态标识（可直接读取）
+ */
+extern bool ble_is_connected;
 
 #ifdef __cplusplus
 }

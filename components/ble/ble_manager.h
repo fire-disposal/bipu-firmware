@@ -23,7 +23,7 @@ typedef enum {
 } ble_state_t;
 
 // --- 消息回调函数类型 ---
-typedef void (*ble_message_callback_t)(const char* sender, const char* message);
+typedef void (*ble_message_callback_t)(const char* sender, const char* message, uint32_t timestamp);
 typedef void (*ble_time_sync_callback_t)(uint32_t timestamp);
 typedef void (*ble_connection_callback_t)(bool connected);
 

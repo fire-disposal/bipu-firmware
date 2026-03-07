@@ -220,3 +220,46 @@ void ui_render_logo(void) {
     board_display_end();
 }
 
+/* ── Toast 覆盖层 ───────────────────────────────────────────
+ *  显示屏规格: 128×64 px
+ *  Toast 盒子: 水平居中，垂直居中，最小宽 60px，内边距 4px
+ * ──────────────────────────────────────────────────────── */
+void ui_render_toast_overlay(const char *msg) {
+    if (!msg || msg[0] == '\0') return;
+
+    /* 选用 12px 汉字字体（中英文通用）*/
+    board_display_set_font(u8g2_font_wqy12_t_gb2312a);
+
+    int tw = board_display_text_width(msg);
+    const int PADDING_H = 6;   /* 水平内边距（每侧） */
+    const int PADDING_V = 4;   /* 垂直内边距（每侧） */
+    const int LINE_H    = 14;  /* 字体行高（12px + 2px 余量） */
+    const int MIN_W     = 60;
+
+    int box_w = tw + PADDING_H * 2;
+    if (box_w < MIN_W) box_w = MIN_W;
+    int box_h = LINE_H + PADDING_V * 2;
+
+    /* 居中定位 */
+    int box_x = (128 - box_w) / 2;
+    int box_y = (64  - box_h) / 2;
+
+    /* 1. 用黑色填充背景矩形（清除底层内容） */
+    board_display_set_draw_color(0);   /* 黑 */
+    board_display_rect(box_x, box_y, box_w, box_h, true);
+
+    /* 2. 白色边框 */
+    board_display_set_draw_color(1);   /* 白 */
+    board_display_rect(box_x,     box_y,     box_w, box_h, false);
+    board_display_rect(box_x + 1, box_y + 1, box_w - 2, box_h - 2, false);
+
+    /* 3. 白色文字（透明背景模式，不覆盖边框） */
+    board_display_set_font_mode(1);    /* 透明 */
+    int text_x = (128 - tw) / 2;
+    int text_y = box_y + PADDING_V + LINE_H - 2; /* 基线 */
+    board_display_text(text_x, text_y, msg);
+
+    /* 恢复默认状态（防污染下一帧） */
+    board_display_set_draw_color(1);
+    board_display_set_font_mode(0);
+}

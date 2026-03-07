@@ -30,6 +30,30 @@ static inline void ui_unlock(void) {
 #define STANDBY_TIMEOUT_MS 30000
 #define DEFAULT_BRIGHTNESS 100
 
+/* ================== 延迟 NVS 保存状态 ================== */
+/* ui_delete_current_message / ui_set_brightness 在 ui_on_key 持锁时被调用，
+ * 不可在锁内直接写 NVS（约 10-50ms 会阻塞 ui_tick / ui_on_key）。
+ * 改为：锁内快照数据 + 设标志，由 app_loop 调用 ui_flush_pending_saves() 完成写入。 */
+static bool s_deferred_msg_save = false;
+static bool s_deferred_brightness_save = false;
+static storage_message_t s_save_snap[MAX_MESSAGES];
+static int  s_save_count;
+static int  s_save_idx;
+static uint8_t s_save_brightness;
+
+/* ================== Toast 状态 ================== */
+#define TOAST_MSG_MAX 64
+static char     s_toast_msg[TOAST_MSG_MAX];
+static bool     s_toast_visible   = false;
+static uint32_t s_toast_expire_ms = 0;   /* 0 = 不自动消失 */
+
+/* 预刷新钩子：由 board_display_end → SendBuffer 之前调用 */
+static void toast_pre_flush_cb(void) {
+    if (s_toast_visible) {
+        ui_render_toast_overlay(s_toast_msg);
+    }
+}
+
 /* ================== 外部页面引用 ================== */
 extern const ui_page_t page_main;
 extern const ui_page_t page_list;
@@ -180,6 +204,8 @@ void ui_init(void) {
     if (s_pages[s_ui.state] && s_pages[s_ui.state]->on_enter) {
         s_pages[s_ui.state]->on_enter();
     }
+    /* 注册 Toast 预刷新钩子（所有帧 sendBuffer 之前自动绘制覆盖层） */
+    board_display_set_pre_flush_cb(toast_pre_flush_cb);
     ui_request_redraw();
     ESP_LOGI(UI_TAG, "UI Manager initialized");
 }
@@ -193,6 +219,18 @@ uint32_t ui_tick(void) {
     uint32_t next_sleep_ms = 1000; // 默认最大休眠时间
     bool do_render = false;
     ui_state_enum_t render_state = s_ui.state;
+
+    // 0. Toast 超时检查
+    if (s_toast_visible && s_toast_expire_ms > 0) {
+        if (board_time_ms() >= s_toast_expire_ms) {
+            s_toast_visible = false;
+            s_needs_redraw  = true;
+        } else {
+            /* toast 仍在倒计时，缩短 tick 间隔以保证及时消失 */
+            uint32_t remain = s_toast_expire_ms - board_time_ms();
+            if (remain < next_sleep_ms) next_sleep_ms = remain;
+        }
+    }
 
     // 1. 逻辑更新 (持有锁)
     if (s_ui.state != UI_STATE_STANDBY) {
@@ -247,6 +285,14 @@ void ui_on_key(board_key_t key) {
 
     ui_update_activity();
 
+    /* Toast 拦截：任意按键立即关闭 toast，不传递给页面 */
+    if (s_toast_visible) {
+        s_toast_visible = false;
+        s_needs_redraw  = true;
+        ui_unlock();
+        return;
+    }
+
     if (s_ui.state == UI_STATE_STANDBY) {
         ESP_LOGI(UI_TAG, "Waking up from standby with key %d", key);
         ui_wake_up();
@@ -298,7 +344,6 @@ void ui_show_message_with_timestamp(const char* sender, const char* text, uint32
     msg->sender[sizeof(msg->sender)-1] = '\0';
     strncpy(msg->text, text, sizeof(msg->text) - 1);
     msg->text[sizeof(msg->text)-1] = '\0';
-    // 使用传入的时间戳
     msg->timestamp = timestamp;
     msg->is_read = false;
 
@@ -306,16 +351,29 @@ void ui_show_message_with_timestamp(const char* sender, const char* text, uint32
 
     ui_wake_up();
     s_ui.current_msg_idx = s_ui.message_count - 1;
-    // ui_change_page 会调用 ui_request_redraw
+    /* ui_change_page 会调用 ui_request_redraw */
     ui_change_page(UI_STATE_MESSAGE_READ);
+
+    /* 快照消息数组以供锁外持久化
+     * NVS 写入约 10-50ms，在锁内执行会导致：
+     *   - ui_tick 等待锁超时（200ms 门限），跳过帧渲染
+     *   - ui_on_key 在按键敲击时无法及时响应
+     * 因此必须在释放锁后执行。
+     */
+    ui_message_t snap[MAX_MESSAGES];
+    int snap_count = s_ui.message_count;
+    int snap_idx   = s_ui.current_msg_idx;
+    memcpy(snap, s_ui.messages, sizeof(ui_message_t) * (size_t)snap_count);
+
+    ui_unlock(); /* ─── 释放锁，以下均在无锁状态执行 ─── */
+
+    /* NVS 持久化（慢速写入，已在锁外，不阻塞 ui_tick / ui_on_key） */
+    storage_save_messages(snap, snap_count, snap_idx);
+
+    /* 硬件通知（在 app_task 上下文中，安全调用） */
     board_notify();
-    // 来信提醒 LED 闪烁 + 震动
     board_leds_double_flash();
     board_vibrate_double();
-    // persist after adding
-    storage_save_messages(s_ui.messages, s_ui.message_count, s_ui.current_msg_idx);
-
-    ui_unlock();
 }
 
 void ui_enter_standby(void) {
@@ -346,6 +404,9 @@ void ui_wake_up(void) {
 
 /* ================== 消息删除功能 ================== */
 void ui_delete_current_message(void) {
+    /* 由 on_key -> ui_on_key 调用，此时 UI 互斥锁已被持有。
+     * 不得在此调用 storage_save_messages（NVS 写入 ~10-50ms 会阻塞 GUI 任务）。
+     * 改为：快照数据 + 设标志，由 app_loop 调用 ui_flush_pending_saves() 完成写入。 */
     if (s_ui.message_count <= 0) return;
 
     int idx = s_ui.current_msg_idx;
@@ -362,9 +423,12 @@ void ui_delete_current_message(void) {
         s_ui.current_msg_idx = s_ui.message_count - 1;
     }
 
-    // 持久化
-    storage_save_messages(s_ui.messages, s_ui.message_count, s_ui.current_msg_idx);
-    
+    // 快照以供锁外持久化
+    memcpy(s_save_snap, s_ui.messages, sizeof(storage_message_t) * (size_t)s_ui.message_count);
+    s_save_count = s_ui.message_count;
+    s_save_idx   = s_ui.current_msg_idx;
+    s_deferred_msg_save = true;
+
     ui_request_redraw();
 
     ESP_LOGI(UI_TAG, "Deleted message at idx %d, remaining: %d", idx, s_ui.message_count);
@@ -400,12 +464,14 @@ void ui_set_brightness(uint8_t level) {
     if (level > 100) level = 100;
     s_ui.brightness = level;
 
-    // 应用亮度到显示器
+    // 立即应用亮度到显示器（纯内存操作，不涉及 NVS）
     board_display_set_contrast((uint8_t)((level * 255) / 100));
 
-    // 保存到存储
-    storage_save_brightness(level);
-    
+    // 延迟保存：此函数在 ui_on_key 持锁时被调用，
+    // 直接写 NVS 会阻塞 GUI 任务。由 ui_flush_pending_saves() 在锁外执行。
+    s_save_brightness = level;
+    s_deferred_brightness_save = true;
+
     ui_request_redraw();
 
     ESP_LOGI(UI_TAG, "Brightness set to %d%%", level);
@@ -418,4 +484,43 @@ void ui_system_restart(void) {
     board_display_set_contrast(0);
     board_execute_cleanup();
     board_system_restart();
+}
+
+/* ================== 延迟 NVS 持久化 ================== */
+void ui_flush_pending_saves(void) {
+    /* 在 app_task（无锁）上下文调用，执行之前因持锁而推迟的 NVS 写入。
+     * 每次写入约 10-50ms，调用前确认不持有 UI 互斥锁。 */
+    if (s_deferred_msg_save) {
+        s_deferred_msg_save = false;
+        storage_save_messages(s_save_snap, s_save_count, s_save_idx);
+        ESP_LOGD(UI_TAG, "Deferred message save completed (%d msgs)", s_save_count);
+    }
+    if (s_deferred_brightness_save) {
+        s_deferred_brightness_save = false;
+        storage_save_brightness(s_save_brightness);
+        ESP_LOGD(UI_TAG, "Deferred brightness save completed (%d%%)", s_save_brightness);
+    }
+}
+
+/* ================== Toast API ================== */
+
+void ui_show_toast(const char *msg, uint32_t auto_dismiss_ms) {
+    if (!msg) return;
+    strncpy(s_toast_msg, msg, TOAST_MSG_MAX - 1);
+    s_toast_msg[TOAST_MSG_MAX - 1] = '\0';
+    s_toast_visible   = true;
+    s_toast_expire_ms = (auto_dismiss_ms > 0) ? (board_time_ms() + auto_dismiss_ms) : 0;
+    ui_request_redraw();
+    ESP_LOGD(UI_TAG, "Toast shown: \"%s\" (auto_dismiss=%ums)", s_toast_msg, auto_dismiss_ms);
+}
+
+bool ui_toast_is_visible(void) {
+    return s_toast_visible;
+}
+
+void ui_toast_dismiss(void) {
+    if (s_toast_visible) {
+        s_toast_visible = false;
+        ui_request_redraw();
+    }
 }

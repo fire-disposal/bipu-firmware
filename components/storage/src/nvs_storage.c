@@ -9,17 +9,23 @@ static const char* TAG = "storage";
 static const char* NAMESPACE = "bipi";
 
 esp_err_t storage_init(void) {
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "NVS partition needs erase, erasing...");
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
+    /* NVS 子系统由 main.c 的 init_nvs() 统一初始化。
+     * 此函数仅验证存储命名空间可访问，不再重复调用 nvs_flash_init()
+     * （避免重复初始化产生的警告，以及边缘情况下误触发 nvs_flash_erase）。 */
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NAMESPACE, NVS_READONLY, &h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        /* 命名空间尚不存在（首次运行），属于正常情况 */
+        ESP_LOGI(TAG, "NVS namespace not found yet, will be created on first write");
+        return ESP_OK;
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_flash_init failed: %d", err);
+        ESP_LOGE(TAG, "storage_init: failed to open NVS namespace '%s': %s",
+                 NAMESPACE, esp_err_to_name(err));
         return err;
     }
-    ESP_LOGI(TAG, "NVS initialized");
+    nvs_close(h);
+    ESP_LOGI(TAG, "NVS storage namespace ready");
     return ESP_OK;
 }
 

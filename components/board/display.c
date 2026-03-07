@@ -14,6 +14,13 @@ static i2c_master_dev_handle_t display_dev_handle = NULL;
 static bool s_display_initialized = false;
 static SemaphoreHandle_t s_display_mutex = NULL;
 
+/* 预刷新钩子：在 SendBuffer 之前调用，用于叠加 Toast/HUD 层 */
+static void (*s_pre_flush_cb)(void) = NULL;
+
+void board_display_set_pre_flush_cb(void (*cb)(void)) {
+    s_pre_flush_cb = cb;
+}
+
 // 显示互斥锁操作
 static inline bool display_lock(void) {
     if (s_display_mutex == NULL) return true;
@@ -46,9 +53,10 @@ static uint8_t u8g2_esp32_i2c_byte_cb(u8x8_t *u8x8, uint8_t msg,
         
         // 检查缓冲区是否有足够空间
         if (buf_idx + arg_int > I2C_TX_BUFFER_SIZE) {
-            ESP_LOGE(BOARD_TAG, "I2C buffer overflow: buf_idx=%zu, arg_int=%u, buffer_size=%d",
-                     buf_idx, arg_int, I2C_TX_BUFFER_SIZE);
-            // 缓冲区不足：直接返回错误，不能继续写入（继续写会破坏已缓冲的帧数据）
+            ESP_LOGE(BOARD_TAG, "I2C buffer overflow: aborting frame (buf_idx=%zu, arg_int=%u)",
+                     buf_idx, arg_int);
+            /* 重置索引丢弃本帧所有已缓冲数据，避免 END_TRANSFER 发出残缺帧 */
+            buf_idx = 0;
             return 0;
         }
 
@@ -191,6 +199,10 @@ void board_display_begin(void) {
 void board_display_end(void) {
     if (!s_display_initialized) {
         return;
+    }
+    /* 覆盖层钩子：Toast / HUD 等 UI 层在此时机绘制，不需要修改任何页面 render 函数 */
+    if (s_pre_flush_cb) {
+        s_pre_flush_cb();
     }
     u8g2_SendBuffer(&s_u8g2);
     display_unlock();
