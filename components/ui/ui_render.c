@@ -11,6 +11,14 @@
 #include <time.h>
 #include <math.h>
 
+static uint32_t s_standby_start_time = 0;
+static bool s_standby_tracked = false;
+
+void ui_render_standby_reset_timer(void) {
+  s_standby_tracked = false;
+  s_standby_start_time = 0;
+}
+
 // 本文件内使用的 UTF-8 回退辅助函数（用于保证不截断字符）
 static int prev_utf8_start_local(const char *s, int idx) {
   while (idx > 0) {
@@ -160,28 +168,40 @@ void ui_render_message_read(const ui_message_t *msg, int current_idx,
 
 
 void ui_render_standby(void) {
+  uint32_t now = board_time_ms();
+  
+  // 首次进入待机时记录开始时间
+  if (!s_standby_tracked) {
+    s_standby_start_time = now;
+    s_standby_tracked = true;
+  }
+  
+  // 60 秒后进入黑屏
+  if (now - s_standby_start_time >= 60000) {
+    board_display_set_contrast(0);
+    return;
+  }
+
   board_display_begin();
 
-  uint32_t now = board_time_ms();
-
   // 周期（毫秒）—— 控制整体速度
-  const uint32_t period_ms = 12000; // 12秒一个完整图案
+  const uint32_t period_ms = 12000; // 12 秒一个完整图案
 
   // 屏幕中心
   const int cx = 64;
   const int cy = 32;
 
   // 振幅（椭圆范围）
-  const float a = 55.0f; // X方向最大偏移
-  const float b = 28.0f; // Y方向最大偏移
+  const float a = 55.0f; // X 方向最大偏移
+  const float b = 28.0f; // Y 方向最大偏移
 
   // Lissajous 频率比（建议用小整数比，如 2:3, 3:4, 5:4 等）
-  const float fx = 3.0f; // X方向频率
-  const float fy = 2.0f; // Y方向频率
+  const float fx = 3.0f; // X 方向频率
+  const float fy = 2.0f; // Y 方向频率
 
   // 相位偏移（弧度），可制造旋转感
   const float px = 0.0f;
-  const float py = M_PI / 2.0f; // 90度相位差 → 更立体
+  const float py = M_PI / 2.0f; // 90 度相位差 → 更立体
 
   // 时间归一化为 [0, 2π)
   float t = 2.0f * M_PI * ((now % period_ms) / (float)period_ms);

@@ -61,19 +61,23 @@ static void gui_task(void* pvParameters)
 /* ===================== 应用初始化 ===================== */
 esp_err_t app_init(void)
 {
-    esp_err_t ret = ESP_OK;
-
     /* 1. 初始化 BLE */
-    ret = ble_manager_init();
+    esp_err_t ret = ble_manager_init();
     if (ret != ESP_OK) {
-        ESP_LOGW(APP_TAG, "BLE 初始化失败 %s", esp_err_to_name(ret));
-    } else {
-        ble_manager_message_queue_init();
-        ble_manager_set_message_callback(ui_show_message_with_timestamp);
-        ble_manager_set_connection_callback(ble_connection_changed);
+        ESP_LOGE(APP_TAG, "BLE init failed: %s", esp_err_to_name(ret));
+        return ret;
     }
 
-    /* 2. UI 初始化 */
+    /* 2. 初始化 BLE 消息队列和回调 */
+    ret = ble_manager_message_queue_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(APP_TAG, "BLE msg queue init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ble_manager_set_message_callback(ui_show_message_with_timestamp);
+    ble_manager_set_connection_callback(ble_connection_changed);
+
+    /* 3. UI 初始化 */
     ui_init();
 
     /* 3. 创建 GUI 任务 */

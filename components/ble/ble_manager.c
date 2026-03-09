@@ -572,6 +572,7 @@ esp_err_t ble_manager_init(void)
 
     esp_err_t ret = esp_nimble_hci_init();
     if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "NimBLE HCI init failed: %s", esp_err_to_name(ret));
         update_ble_state(BLE_STATE_ERROR);
         return ret;
     }
@@ -582,6 +583,7 @@ esp_err_t ble_manager_init(void)
 
     int rc = ble_gatts_count_cfg(nus_gatt_svcs);
     if (rc != 0) {
+        ESP_LOGE(TAG, "GATT count cfg failed: %d", rc);
         esp_nimble_hci_deinit();
         update_ble_state(BLE_STATE_ERROR);
         return ESP_FAIL;
@@ -589,6 +591,7 @@ esp_err_t ble_manager_init(void)
 
     rc = ble_gatts_add_svcs(nus_gatt_svcs);
     if (rc != 0) {
+        ESP_LOGE(TAG, "GATT add svcs failed: %d", rc);
         esp_nimble_hci_deinit();
         update_ble_state(BLE_STATE_ERROR);
         return ESP_FAIL;

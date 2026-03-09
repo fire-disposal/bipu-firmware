@@ -380,6 +380,10 @@ void ui_enter_standby(void) {
     if (s_ui.state != UI_STATE_STANDBY) {
         // 使用统一的页面切换流程以触发当前页面的 exit handler
         ui_change_page(UI_STATE_STANDBY);
+        // 恢复亮度并重置待机计时器
+        board_display_set_contrast((uint8_t)((s_ui.brightness * 255) / 100));
+        // 重置待机计时器标志（由 ui_render_standby 使用）
+        ui_render_standby_reset_timer();
         // 渲染待机屏保
         ui_render_standby();
         // 进入待机时，只有手电筒未开启才关闭 LED
@@ -398,6 +402,8 @@ void ui_wake_up(void) {
     if (s_ui.state == UI_STATE_STANDBY) {
         ui_change_page(UI_STATE_MAIN);
         ui_update_activity();
+        // 恢复亮度
+        board_display_set_contrast((uint8_t)((s_ui.brightness * 255) / 100));
         ESP_LOGI(UI_TAG, "Woke up");
     }
 }

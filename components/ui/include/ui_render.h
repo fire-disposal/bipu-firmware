@@ -27,6 +27,11 @@ void ui_render_message_read(const ui_message_t* msg, int current_idx, int total_
 void ui_render_standby(void);
 
 /**
+ * @brief 重置待机计时器（进入待机时调用）
+ */
+void ui_render_standby_reset_timer(void);
+
+/**
  * @brief 渲染开机 LOGO
  */
 void ui_render_logo(void);
