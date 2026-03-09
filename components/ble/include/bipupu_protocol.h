@@ -126,12 +126,22 @@ size_t bipupu_protocol_create_binding_info(uint32_t timestamp, const char* bindi
 /**
  * @brief 创建解绑确认数据包
  * 
- * @param timestamp Unix时间戳 (秒)
+ * @param timestamp Unix 时间戳 (秒)
  * @param buffer 输出缓冲区
  * @param buffer_size 缓冲区大小
- * @return size_t 实际写入的字节数，0表示失败
+ * @return size_t 实际写入的字节数，0 表示失败
  */
 size_t bipupu_protocol_create_unbind_confirm(uint32_t timestamp, uint8_t* buffer, size_t buffer_size);
+
+/**
+ * @brief 创建 ACK 确认响应数据包
+ * 
+ * @param original_message_id 原始消息 ID（这里使用时间戳作为消息标识）
+ * @param buffer 输出缓冲区
+ * @param buffer_size 缓冲区大小
+ * @return size_t 实际写入的字节数，0 表示失败
+ */
+size_t bipupu_protocol_create_acknowledgement(uint32_t original_message_id, uint8_t* buffer, size_t buffer_size);
 
 /**
  * @brief 验证数据包的基本有效性

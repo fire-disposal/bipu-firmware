@@ -119,6 +119,8 @@ static void ble_advertise(void);
 static int nus_rx_write_cb(uint16_t conn_handle, uint16_t attr_handle,
                           struct ble_gatt_access_ctxt *ctxt, void *arg);
 static void handle_received_packet(const uint8_t* data, size_t length);
+static esp_err_t nus_tx_notify(const uint8_t* data, size_t length);
+static void send_ack_response(uint32_t original_message_id);
 
 
 /* ================== NUS 服务句柄 ================== */
@@ -211,6 +213,9 @@ static void handle_received_packet(const uint8_t* data, size_t length)
 
                 if (xQueueSend(s_msg_queue, &evt, 0) != pdTRUE) {
                     ESP_LOGW(TAG, "队列已满丢弃 [%s]", packet.sender_name);
+                } else {
+                    // 消息成功入队，发送 ACK 确认
+                    send_ack_response(packet.timestamp);
                 }
             }
             break;
@@ -262,6 +267,23 @@ static int nus_rx_write_cb(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
+/** 发送 ACK 确认响应 */
+static void send_ack_response(uint32_t original_message_id)
+{
+    if (!s_ble_connected || s_conn_handle == 0xFFFF) {
+        return;
+    }
+
+    uint8_t buffer[64];
+    size_t packet_length = bipupu_protocol_create_acknowledgement(
+        original_message_id, buffer, sizeof(buffer));
+
+    if (packet_length > 0) {
+        nus_tx_notify(buffer, packet_length);
+        ESP_LOGI(TAG, "已发送 ACK: msg_id=%u", original_message_id);
+    }
+}
+
 /** 处理绑定相关数据包 */
 static void handle_binding_packet(const uint8_t* data, size_t length)
 {
@@ -277,12 +299,18 @@ static void handle_binding_packet(const uint8_t* data, size_t length)
             bipupu_protocol_decode_utf8_safe(parsed.data, parsed.data_length, json_str);
             ESP_LOGI(TAG, "绑定 %s", json_str);
             save_binding_info();
+            // 发送 ACK 确认绑定成功
+            send_ack_response(parsed.timestamp);
             break;
         }
 
         case BIPUPU_MSG_UNBIND_COMMAND:
             ESP_LOGI(TAG, "解绑");
             clear_binding_info();
+            // 发送解绑确认响应
+            send_ack_response(parsed.timestamp);
+            // 延迟断开连接，确保响应发送完成
+            vTaskDelay(pdMS_TO_TICKS(50));
             if (s_ble_connected && s_conn_handle != 0xFFFF) {
                 ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             }

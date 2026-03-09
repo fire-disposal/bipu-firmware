@@ -11,6 +11,8 @@
 
 static const char* TAG = "PAGE_SETTINGS";
 
+#define FW_VERSION "v1.2.0"
+
 /* ================== 设置选项定义 ================== */
 typedef enum {
     SETTING_BRIGHTNESS,    // 亮度调节
@@ -80,8 +82,9 @@ static void render_about(void) {
     ui_draw_text_centered(0, 10, 128, "关于设备");
     
     // 设备信息
-    board_display_text(4, 26, "BIPI Pager v1.0");
-    board_display_text(4, 40, "ESP32-C3 BLE");
+    board_display_text(4, 26, "BIPI Pager");
+    board_display_text(4, 40, "固件版本: " FW_VERSION);
+    board_display_text(4, 54, "ESP32-C3 BLE");
     
     board_display_end();
 }
