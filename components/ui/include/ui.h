@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 #include "ui_types.h"
+#include "pages/page_base.h"
 
 /* ================== UI 类型定义 ================== */
 
@@ -25,7 +26,40 @@ typedef enum {
 void ui_init(void);
 uint32_t ui_tick(void); // 返回下一次 tick 的等待时间 (ms)
 void ui_on_key(board_key_t key);
-void ui_change_page(ui_state_enum_t new_state);
+
+/* ================== 新架构接口（推荐使用） ================== */
+
+/**
+ * @brief 获取主页面对象
+ */
+ui_page_base_t* ui_get_main_page(void);
+
+/**
+ * @brief 获取列表页面对象
+ */
+ui_page_base_t* ui_get_list_page(void);
+
+/**
+ * @brief 获取消息页面对象
+ */
+ui_page_base_t* ui_get_message_page(void);
+
+/**
+ * @brief 获取设置页面对象
+ */
+ui_page_base_t* ui_get_settings_page(void);
+
+/**
+ * @brief 导航到新页面（新架构）
+ * @param page 页面对象
+ * @param params 参数（可选）
+ */
+void ui_navigate_to_page(ui_page_base_t* page, void* params);
+
+/**
+ * @brief 返回上一页（新架构）
+ */
+void ui_go_back(void);
 
 /**
  * @brief 请求重绘 UI

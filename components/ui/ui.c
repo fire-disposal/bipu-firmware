@@ -2,6 +2,8 @@
 #include "ui_page.h"
 #include "ui_types.h"
 #include "ui_render.h"
+#include "ui_task.h"
+#include "ui_state_machine.h"
 #include "board.h"
 #include "storage.h"
 #include "esp_log.h"
@@ -50,8 +52,13 @@ static uint32_t s_toast_expire_ms = 0;   /* 0 = 不自动消失 */
 /* 预刷新钩子：由 board_display_end → SendBuffer 之前调用 */
 static void toast_pre_flush_cb(void) {
     if (s_toast_visible) {
-        ui_render_toast_overlay(s_toast_msg);
+        ui_render_toast(s_toast_msg);  // 使用新的统一接口
     }
+}
+
+/* GUI 任务重绘回调包装器 */
+static void ui_redraw_callback_wrapper(void) {
+    ui_request_redraw();
 }
 
 /* ================== 外部页面引用 ================== */
@@ -184,6 +191,13 @@ void ui_init(void) {
         ESP_LOGE(UI_TAG, "Failed to create UI mutex!");
     }
 
+    // 初始化状态机（新架构）
+    ui_state_machine_init();
+    
+    // 启动 GUI 任务（新架构）
+    ui_task_start();
+    ui_task_set_redraw_callback(ui_redraw_callback_wrapper);
+
     // initialize NVS storage and load persisted messages
     if (storage_init() == ESP_OK) {
         int loaded_count = 0;
@@ -203,15 +217,18 @@ void ui_init(void) {
     } else {
         ESP_LOGW(UI_TAG, "storage_init failed");
     }
+    
+    // 设置初始状态（新架构）
     s_ui.state = UI_STATE_MAIN;
     ui_update_activity();
-    if (s_pages[s_ui.state] && s_pages[s_ui.state]->on_enter) {
-        s_pages[s_ui.state]->on_enter();
-    }
+    
     /* 注册 Toast 预刷新钩子（所有帧 sendBuffer 之前自动绘制覆盖层） */
     board_display_set_pre_flush_cb(toast_pre_flush_cb);
-    ui_request_redraw();
-    ESP_LOGI(UI_TAG, "UI Manager initialized");
+    
+    // 导航到主页（新架构）
+    ui_navigate_to_page(ui_get_main_page(), NULL);
+    
+    ESP_LOGI(UI_TAG, "UI Manager initialized (new architecture)");
 }
 
 uint32_t ui_tick(void) {
