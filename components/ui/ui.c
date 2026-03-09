@@ -1,5 +1,4 @@
 #include "ui.h"
-#include "ui_page.h"
 #include "ui_types.h"
 #include "ui_render.h"
 #include "ui_task.h"
@@ -10,12 +9,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include <string.h>
+#include <time.h>
 
 static const char* UI_TAG = "ui_manager";
 
 /* ================== UI 互斥锁 ================== */
-// 保护所有 UI 状态（state, messages, indices, page vars）
-// 避免 app_task(ui_on_key) 与 gui_task(ui_tick) 之间的竞态
 static SemaphoreHandle_t s_ui_mutex = NULL;
 
 static inline bool ui_lock(void) {
@@ -29,13 +27,7 @@ static inline void ui_unlock(void) {
     }
 }
 
-#define STANDBY_TIMEOUT_MS 60000  // 60 秒无操作进入待机（黑屏）
-#define DEFAULT_BRIGHTNESS 100
-
 /* ================== 延迟 NVS 保存状态 ================== */
-/* ui_delete_current_message / ui_set_brightness 在 ui_on_key 持锁时被调用，
- * 不可在锁内直接写 NVS（约 10-50ms 会阻塞 ui_tick / ui_on_key）。
- * 改为：锁内快照数据 + 设标志，由 app_loop 调用 ui_flush_pending_saves() 完成写入。 */
 static bool s_deferred_msg_save = false;
 static bool s_deferred_brightness_save = false;
 static storage_message_t s_save_snap[MAX_MESSAGES];
@@ -47,320 +39,187 @@ static uint8_t s_save_brightness;
 #define TOAST_MSG_MAX 64
 static char     s_toast_msg[TOAST_MSG_MAX];
 static bool     s_toast_visible   = false;
-static uint32_t s_toast_expire_ms = 0;   /* 0 = 不自动消失 */
+static uint32_t s_toast_expire_ms = 0;
 
-/* 预刷新钩子：由 board_display_end → SendBuffer 之前调用 */
-static void toast_pre_flush_cb(void) {
-    if (s_toast_visible) {
-        ui_render_toast(s_toast_msg);  // 使用新的统一接口
-    }
-}
-
-/* GUI 任务重绘回调包装器 */
-static void ui_redraw_callback_wrapper(void) {
-    ui_request_redraw();
-}
-
-/* ================== 外部页面引用 ================== */
-extern const ui_page_t page_main;
-extern const ui_page_t page_list;
-extern const ui_page_t page_message;
-extern const ui_page_t page_settings;
-
-static const ui_page_t* s_pages[] = {
-    [UI_STATE_MAIN] = &page_main,
-    [UI_STATE_MESSAGE_LIST] = &page_list,
-    [UI_STATE_MESSAGE_READ] = &page_message,
-    [UI_STATE_SETTINGS] = &page_settings,
-};
-
-/* ================== 脏标记与回调 ================== */
-static bool s_needs_redraw = true;
-static void (*s_redraw_cb)(void) = NULL;
-
-void ui_request_redraw(void) {
-    s_needs_redraw = true;
-    if (s_redraw_cb) {
-        s_redraw_cb();
-    }
-}
-
-void ui_set_redraw_callback(void (*cb)(void)) {
-    s_redraw_cb = cb;
-}
-
-/* ================== 内部状态定义 ================== */
+/* ================== UI 数据状态 ================== */
 typedef struct {
-    ui_state_enum_t state;
     ui_message_t messages[MAX_MESSAGES];
     int message_count;
     int current_msg_idx;
     uint32_t last_activity_time;
-    bool flashlight_on;      // 手电筒状态
-    uint8_t brightness;      // OLED 亮度 (10-100%)
-} ui_context_t;
+    bool flashlight_on;
+    uint8_t brightness;
+} ui_data_t;
 
-static ui_context_t s_ui;
+static ui_data_t s_ui_data = {0};
 
 /* ================== 数据访问接口 ================== */
-int ui_get_message_count(void) { return s_ui.message_count; }
-int ui_get_current_message_idx(void) { return s_ui.current_msg_idx; }
+int ui_get_message_count(void) { return s_ui_data.message_count; }
+int ui_get_current_message_idx(void) { return s_ui_data.current_msg_idx; }
+
 void ui_set_current_message_idx(int idx) {
-    if (s_ui.current_msg_idx != idx) {
-        s_ui.current_msg_idx = idx;
-        // 优化：仅在内存中更新，不立即写 Flash
-        // storage_save_messages(s_ui.messages, s_ui.message_count, s_ui.current_msg_idx);
-        ui_request_redraw();
+    if (s_ui_data.current_msg_idx != idx) {
+        s_ui_data.current_msg_idx = idx;
+        ui_task_request_redraw();
     }
 }
 
 int ui_get_unread_count(void) {
     int unread = 0;
-    for(int i=0; i<s_ui.message_count; i++) {
-        if(!s_ui.messages[i].is_read) unread++;
+    for(int i=0; i<s_ui_data.message_count; i++) {
+        if(!s_ui_data.messages[i].is_read) unread++;
     }
     return unread;
 }
 
 uint32_t ui_get_last_activity_time(void) {
-    return s_ui.last_activity_time;
+    return s_ui_data.last_activity_time;
 }
 
 ui_message_t* ui_get_message_at(int idx) {
-    if (idx < 0 || idx >= s_ui.message_count) return NULL;
-    return &s_ui.messages[idx];
+    if (idx < 0 || idx >= s_ui_data.message_count) return NULL;
+    return &s_ui_data.messages[idx];
 }
 
-/* ================== 辅助函数 ================== */
 static void ui_update_activity(void) {
-    s_ui.last_activity_time = board_time_ms();
+    s_ui_data.last_activity_time = board_time_ms();
 }
 
-void ui_change_page(ui_state_enum_t new_state) {
-    ESP_LOGD(UI_TAG, "Changing page from %d to %d", s_ui.state, new_state);
+/* ================== GUI 任务重绘回调 ================== */
+static void ui_redraw_callback_wrapper(void) {
+    ui_task_request_redraw();
+}
 
-    if (new_state == s_ui.state) {
-        ESP_LOGD(UI_TAG, "Page change ignored - same state");
-        return;
+/* ================== Toast 预刷新钩子 ================== */
+static void toast_pre_flush_cb(void) {
+    if (s_toast_visible) {
+        ui_render_toast(s_toast_msg);
     }
-
-    // Validate transitions: do not enter message-related pages when there are no messages
-    if ((new_state == UI_STATE_MESSAGE_LIST || new_state == UI_STATE_MESSAGE_READ) && s_ui.message_count == 0) {
-        ESP_LOGW(UI_TAG, "Attempt to enter message page but no messages exist, redirecting to MAIN");
-        new_state = UI_STATE_MAIN;
-    }
-
-    // Ensure current index is within valid range when entering message pages
-    if (new_state == UI_STATE_MESSAGE_LIST || new_state == UI_STATE_MESSAGE_READ) {
-        if (s_ui.current_msg_idx < 0) s_ui.current_msg_idx = 0;
-        if (s_ui.current_msg_idx >= s_ui.message_count && s_ui.message_count > 0) {
-            // default to the most recent message for better UX
-            s_ui.current_msg_idx = s_ui.message_count - 1;
-        }
-    }
-
-    // 调用旧页面的 exit
-    if (s_ui.state != UI_STATE_STANDBY && s_pages[s_ui.state] && s_pages[s_ui.state]->on_exit) {
-        ESP_LOGD(UI_TAG, "Calling exit handler for state %d", s_ui.state);
-        s_pages[s_ui.state]->on_exit();
-    }
-
-    ui_state_enum_t old_state = s_ui.state;
-    s_ui.state = new_state;
-
-    // 调用新页面的 enter
-    if (new_state != UI_STATE_STANDBY && s_pages[new_state] && s_pages[new_state]->on_enter) {
-        ESP_LOGD(UI_TAG, "Calling enter handler for state %d", new_state);
-        s_pages[new_state]->on_enter();
-    }
-    
-    ui_request_redraw();
-
-    ESP_LOGD(UI_TAG, "Page change completed: %d -> %d", old_state, new_state);
 }
 
 /* ================== 核心接口实现 ================== */
 void ui_init(void) {
-    memset(&s_ui, 0, sizeof(s_ui));
-    s_ui.brightness = DEFAULT_BRIGHTNESS;
-    s_ui.flashlight_on = false;
+    memset(&s_ui_data, 0, sizeof(s_ui_data));
+    s_ui_data.brightness = 100;
+    s_ui_data.flashlight_on = false;
 
-    // 创建 UI 互斥锁（保护 UI 状态免受多任务竞态）
+    // 创建 UI 互斥锁
     s_ui_mutex = xSemaphoreCreateMutex();
     if (s_ui_mutex == NULL) {
         ESP_LOGE(UI_TAG, "Failed to create UI mutex!");
     }
 
-    // 初始化状态机（新架构）
+    // 初始化状态机
     ui_state_machine_init();
     
-    // 启动 GUI 任务（新架构）
+    // 启动 GUI 任务
     ui_task_start();
     ui_task_set_redraw_callback(ui_redraw_callback_wrapper);
 
-    // initialize NVS storage and load persisted messages
+    // 加载 NVS 数据
     if (storage_init() == ESP_OK) {
         int loaded_count = 0;
         int loaded_idx = 0;
-        if (storage_load_messages(s_ui.messages, &loaded_count, &loaded_idx) == ESP_OK) {
-            s_ui.message_count = loaded_count;
-            s_ui.current_msg_idx = loaded_idx;
-            ESP_LOGI(UI_TAG, "Loaded %d messages from storage, current idx=%d", loaded_count, loaded_idx);
+        if (storage_load_messages(s_ui_data.messages, &loaded_count, &loaded_idx) == ESP_OK) {
+            s_ui_data.message_count = loaded_count;
+            s_ui_data.current_msg_idx = loaded_idx;
+            ESP_LOGI(UI_TAG, "Loaded %d messages from storage", loaded_count);
         }
-        // 加载保存的亮度设置
+        
         uint8_t saved_brightness = 0;
         if (storage_load_brightness(&saved_brightness) == ESP_OK) {
-            s_ui.brightness = saved_brightness;
+            s_ui_data.brightness = saved_brightness;
             board_display_set_contrast((uint8_t)((saved_brightness * 255) / 100));
-            ESP_LOGI(UI_TAG, "Loaded brightness: %d%%", saved_brightness);
         }
-    } else {
-        ESP_LOGW(UI_TAG, "storage_init failed");
     }
     
-    // 设置初始状态（新架构）
-    s_ui.state = UI_STATE_MAIN;
-    ui_update_activity();
-    
-    /* 注册 Toast 预刷新钩子（所有帧 sendBuffer 之前自动绘制覆盖层） */
+    // 注册 Toast 钩子
     board_display_set_pre_flush_cb(toast_pre_flush_cb);
     
-    // 导航到主页（新架构）
+    // 导航到主页
     ui_navigate_to_page(ui_get_main_page(), NULL);
     
-    ESP_LOGI(UI_TAG, "UI Manager initialized (new architecture)");
+    ESP_LOGI(UI_TAG, "UI initialized (new architecture)");
 }
 
 uint32_t ui_tick(void) {
     if (!ui_lock()) {
-        ESP_LOGW(UI_TAG, "ui_tick: failed to acquire lock, retry soon");
         return 100;
     }
 
-    uint32_t next_sleep_ms = 1000; // 默认最大休眠时间
-    bool do_render = false;
-    ui_state_enum_t render_state = s_ui.state;
-
-    // 0. Toast 超时检查
+    uint32_t next_sleep_ms = 1000;
+    ui_page_base_t* current_page = ui_get_current_page();
+    
+    // Toast 超时检查
     if (s_toast_visible && s_toast_expire_ms > 0) {
         if (board_time_ms() >= s_toast_expire_ms) {
             s_toast_visible = false;
-            s_needs_redraw  = true;
         } else {
-            /* toast 仍在倒计时，缩短 tick 间隔以保证及时消失 */
             uint32_t remain = s_toast_expire_ms - board_time_ms();
             if (remain < next_sleep_ms) next_sleep_ms = remain;
         }
     }
-
-    // 1. 逻辑更新 (持有锁)
-    if (s_ui.state != UI_STATE_STANDBY) {
-        // 检查自动待机超时
-        if (board_time_ms() - s_ui.last_activity_time > STANDBY_TIMEOUT_MS) {
-            ESP_LOGD(UI_TAG, "Activity timeout, entering standby (black screen)");
-            ui_enter_standby(); // 状态变为 STANDBY
-            render_state = UI_STATE_STANDBY;
-            s_needs_redraw = true;
-            next_sleep_ms = 1000; // 待机黑屏，降低刷新率
-        } else {
-            // 调用当前页面的 update 逻辑
-            if (s_pages[s_ui.state] && s_pages[s_ui.state]->update) {
-                uint32_t page_sleep = s_pages[s_ui.state]->update();
-                if (page_sleep < next_sleep_ms) next_sleep_ms = page_sleep;
-            }
-        }
-    } else {
-        // 待机状态（黑屏）- 不渲染动画，降低刷新率以省电
-        next_sleep_ms = 1000; // 1 秒检查一次即可
-        s_needs_redraw = false; // 黑屏不渲染
+    
+    // 页面更新
+    if (current_page && current_page->update && current_page->update_interval > 0) {
+        current_page->update(current_page, current_page->update_interval);
     }
 
-    // 2. 决定是否渲染
-    if (s_needs_redraw) {
-        do_render = true;
-        s_needs_redraw = false; // 清除标志
-    }
-
-    // 3. 释放锁 (关键优化：渲染过程不持有锁，避免阻塞按键中断)
     ui_unlock();
 
-    // 4. 执行渲染 (无锁状态)
-    if (do_render) {
-        if (render_state == UI_STATE_STANDBY) {
-            ui_render_standby();
-        } else if (s_pages[render_state] && s_pages[render_state]->render) {
-            s_pages[render_state]->render();
-        }
+    // 渲染（无锁）
+    if (current_page && current_page->needs_render && current_page->render) {
+        current_page->render(current_page);
+        current_page->needs_render = false;
     }
 
     return next_sleep_ms > 0 ? next_sleep_ms : 1000;
 }
 
 void ui_on_key(board_key_t key) {
-    ESP_LOGI(UI_TAG, "UI received key: %d, current state: %d", key, s_ui.state);
-
     if (!ui_lock()) {
-        ESP_LOGW(UI_TAG, "ui_on_key: failed to acquire lock, drop key %d", key);
+        ESP_LOGW(UI_TAG, "ui_on_key: failed to acquire lock");
         return;
     }
 
     ui_update_activity();
 
-    /* Toast 拦截：任意按键立即关闭 toast，不传递给页面 */
+    // Toast 拦截
     if (s_toast_visible) {
         s_toast_visible = false;
-        s_needs_redraw  = true;
         ui_unlock();
+        ui_task_request_redraw();
         return;
     }
 
-    if (s_ui.state == UI_STATE_STANDBY) {
-        ESP_LOGI(UI_TAG, "Waking up from standby with key %d", key);
-        ui_wake_up();
-        // 唤醒后，如果按键是 ENTER 或 DOWN，继续处理
-        if (key == BOARD_KEY_ENTER || key == BOARD_KEY_DOWN || key == BOARD_KEY_UP) {
-            ESP_LOGI(UI_TAG, "Processing key %d after wake up", key);
-            // 显示已初始化，直接处理按键
-            if (s_pages[s_ui.state] && s_pages[s_ui.state]->on_key) {
-                s_pages[s_ui.state]->on_key(key);
-                ESP_LOGI(UI_TAG, "Delegated key %d to page handler for state %d", key, s_ui.state);
-            }
-        }
-        ui_unlock();
-        return;
-    }
-
-    if (s_pages[s_ui.state] && s_pages[s_ui.state]->on_key) {
-        ESP_LOGI(UI_TAG, "Passing key %d to page handler for state %d", key, s_ui.state);
-        s_pages[s_ui.state]->on_key(key);
-        // 假设按键处理会导致 UI 变化，请求重绘
-        ui_request_redraw();
-    } else {
-        ESP_LOGW(UI_TAG, "No key handler for state %d", s_ui.state);
+    // 获取当前页面并处理按键
+    ui_page_base_t* current_page = ui_get_current_page();
+    if (current_page && current_page->on_key) {
+        current_page->on_key(current_page, key);
     }
 
     ui_unlock();
 }
 
+/* ================== 消息接口 ================== */
 void ui_show_message(const char* sender, const char* text) {
-    // 调用带时间戳的版本，使用当前时间
     ui_show_message_with_timestamp(sender, text, (uint32_t)time(NULL));
 }
 
 void ui_show_message_with_timestamp(const char* sender, const char* text, uint32_t timestamp) {
     if (!ui_lock()) {
-        ESP_LOGW(UI_TAG, "ui_show_message_with_timestamp: failed to acquire lock, message dropped");
+        ESP_LOGW(UI_TAG, "ui_show_message: failed to acquire lock");
         return;
     }
 
-    if (s_ui.message_count >= MAX_MESSAGES) {
+    if (s_ui_data.message_count >= MAX_MESSAGES) {
         for (int i = 0; i < MAX_MESSAGES - 1; i++) {
-            s_ui.messages[i] = s_ui.messages[i + 1];
+            s_ui_data.messages[i] = s_ui_data.messages[i + 1];
         }
-        s_ui.message_count = MAX_MESSAGES - 1;
+        s_ui_data.message_count = MAX_MESSAGES - 1;
     }
 
-    ui_message_t* msg = &s_ui.messages[s_ui.message_count++];
+    ui_message_t* msg = &s_ui_data.messages[s_ui_data.message_count++];
     strncpy(msg->sender, sender, sizeof(msg->sender) - 1);
     msg->sender[sizeof(msg->sender)-1] = '\0';
     strncpy(msg->text, text, sizeof(msg->text) - 1);
@@ -368,140 +227,95 @@ void ui_show_message_with_timestamp(const char* sender, const char* text, uint32
     msg->timestamp = timestamp;
     msg->is_read = false;
 
-    ESP_LOGI(UI_TAG, "显示消息 - 发送者: %s, 时间戳: %u", sender, timestamp);
+    s_ui_data.current_msg_idx = s_ui_data.message_count - 1;
 
-    ui_wake_up();
-    s_ui.current_msg_idx = s_ui.message_count - 1;
-    /* ui_change_page 会调用 ui_request_redraw */
-    ui_change_page(UI_STATE_MESSAGE_READ);
+    // 快照消息数组
+    memcpy(s_save_snap, s_ui_data.messages, sizeof(storage_message_t) * s_ui_data.message_count);
+    s_save_count = s_ui_data.message_count;
+    s_save_idx = s_ui_data.current_msg_idx;
+    s_deferred_msg_save = true;
 
-    /* 快照消息数组以供锁外持久化
-     * NVS 写入约 10-50ms，在锁内执行会导致：
-     *   - ui_tick 等待锁超时（200ms 门限），跳过帧渲染
-     *   - ui_on_key 在按键敲击时无法及时响应
-     * 因此必须在释放锁后执行。
-     */
-    ui_message_t snap[MAX_MESSAGES];
-    int snap_count = s_ui.message_count;
-    int snap_idx   = s_ui.current_msg_idx;
-    memcpy(snap, s_ui.messages, sizeof(ui_message_t) * (size_t)snap_count);
+    ui_unlock();
 
-    ui_unlock(); /* ─── 释放锁，以下均在无锁状态执行 ─── */
+    // NVS 持久化（锁外）
+    storage_save_messages(s_save_snap, s_save_count, s_save_idx);
 
-    /* NVS 持久化（慢速写入，已在锁外，不阻塞 ui_tick / ui_on_key） */
-    storage_save_messages(snap, snap_count, snap_idx);
-
-    /* 硬件通知（在 app_task 上下文中，安全调用） */
+    // 导航到消息页面并通知硬件
+    ui_navigate_to_page(ui_get_message_page(), NULL);
     board_notify();
     board_leds_double_flash();
     board_vibrate_double();
 }
 
-void ui_enter_standby(void) {
-    if (s_ui.state != UI_STATE_STANDBY) {
-        // 使用统一的页面切换流程以触发当前页面的 exit handler
-        ui_change_page(UI_STATE_STANDBY);
-        // 黑屏：不渲染待机动画，直接关闭显示以省电
-        board_display_set_contrast(0);
-        // 进入待机时，只有手电筒未开启才关闭 LED
-        if (!s_ui.flashlight_on) {
-            board_leds_off();
-        }
-        ESP_LOGI(UI_TAG, "Entered standby (black screen)");
-    }
-}
-
-bool ui_is_in_standby(void) {
-    return s_ui.state == UI_STATE_STANDBY;
-}
-
-void ui_wake_up(void) {
-    if (s_ui.state == UI_STATE_STANDBY) {
-        ui_change_page(UI_STATE_MAIN);
-        ui_update_activity();
-        ESP_LOGI(UI_TAG, "Woke up");
-    }
-}
-
-/* ================== 消息删除功能 ================== */
 void ui_delete_current_message(void) {
-    /* 由 on_key -> ui_on_key 调用，此时 UI 互斥锁已被持有。
-     * 不得在此调用 storage_save_messages（NVS 写入 ~10-50ms 会阻塞 GUI 任务）。
-     * 改为：快照数据 + 设标志，由 app_loop 调用 ui_flush_pending_saves() 完成写入。 */
-    if (s_ui.message_count <= 0) return;
-
-    int idx = s_ui.current_msg_idx;
-    if (idx < 0 || idx >= s_ui.message_count) return;
-
-    // 移动后面的消息
-    for (int i = idx; i < s_ui.message_count - 1; i++) {
-        s_ui.messages[i] = s_ui.messages[i + 1];
-    }
-    s_ui.message_count--;
-
-    // 调整当前索引
-    if (s_ui.current_msg_idx >= s_ui.message_count && s_ui.message_count > 0) {
-        s_ui.current_msg_idx = s_ui.message_count - 1;
+    if (!ui_lock()) return;
+    
+    if (s_ui_data.message_count <= 0) {
+        ui_unlock();
+        return;
     }
 
-    // 快照以供锁外持久化
-    memcpy(s_save_snap, s_ui.messages, sizeof(storage_message_t) * (size_t)s_ui.message_count);
-    s_save_count = s_ui.message_count;
-    s_save_idx   = s_ui.current_msg_idx;
+    int idx = s_ui_data.current_msg_idx;
+    if (idx < 0 || idx >= s_ui_data.message_count) {
+        ui_unlock();
+        return;
+    }
+
+    for (int i = idx; i < s_ui_data.message_count - 1; i++) {
+        s_ui_data.messages[i] = s_ui_data.messages[i + 1];
+    }
+    s_ui_data.message_count--;
+
+    if (s_ui_data.current_msg_idx >= s_ui_data.message_count && s_ui_data.message_count > 0) {
+        s_ui_data.current_msg_idx = s_ui_data.message_count - 1;
+    }
+
+    memcpy(s_save_snap, s_ui_data.messages, sizeof(storage_message_t) * s_ui_data.message_count);
+    s_save_count = s_ui_data.message_count;
+    s_save_idx = s_ui_data.current_msg_idx;
     s_deferred_msg_save = true;
 
-    ui_request_redraw();
-
-    ESP_LOGI(UI_TAG, "Deleted message at idx %d, remaining: %d", idx, s_ui.message_count);
+    ui_unlock();
 }
 
 /* ================== 手电筒功能 ================== */
 bool ui_is_flashlight_on(void) {
-    return s_ui.flashlight_on;
+    return s_ui_data.flashlight_on;
 }
 
 void ui_toggle_flashlight(void) {
-    s_ui.flashlight_on = !s_ui.flashlight_on;
+    s_ui_data.flashlight_on = !s_ui_data.flashlight_on;
 
-    if (s_ui.flashlight_on) {
-        // 点亮所有 LED 作为手电筒
+    if (s_ui_data.flashlight_on) {
         board_leds_t leds = { .led1 = 255, .led2 = 255, .led3 = 255 };
         board_leds_set(leds);
-        ESP_LOGI(UI_TAG, "Flashlight ON");
     } else {
-        ESP_LOGI(UI_TAG, "Flashlight OFF");
-        board_leds_off(); // 确保关闭
+        board_leds_off();
     }
-    ui_request_redraw();
+    
+    ui_task_request_redraw();
 }
 
 /* ================== 亮度控制 ================== */
 uint8_t ui_get_brightness(void) {
-    return s_ui.brightness;
+    return s_ui_data.brightness;
 }
 
 void ui_set_brightness(uint8_t level) {
     if (level < 10) level = 10;
     if (level > 100) level = 100;
-    s_ui.brightness = level;
+    s_ui_data.brightness = level;
 
-    // 立即应用亮度到显示器（纯内存操作，不涉及 NVS）
     board_display_set_contrast((uint8_t)((level * 255) / 100));
 
-    // 延迟保存：此函数在 ui_on_key 持锁时被调用，
-    // 直接写 NVS 会阻塞 GUI 任务。由 ui_flush_pending_saves() 在锁外执行。
     s_save_brightness = level;
     s_deferred_brightness_save = true;
-
-    ui_request_redraw();
-
-    ESP_LOGI(UI_TAG, "Brightness set to %d%%", level);
+    
+    ui_task_request_redraw();
 }
 
 /* ================== 系统控制 ================== */
 void ui_system_restart(void) {
-    ESP_LOGI(UI_TAG, "System restart requested from UI");
-    // 关闭显示以给用户重启反馈
     board_display_set_contrast(0);
     board_execute_cleanup();
     board_system_restart();
@@ -509,30 +323,24 @@ void ui_system_restart(void) {
 
 /* ================== 延迟 NVS 持久化 ================== */
 void ui_flush_pending_saves(void) {
-    /* 在 app_task（无锁）上下文调用，执行之前因持锁而推迟的 NVS 写入。
-     * 每次写入约 10-50ms，调用前确认不持有 UI 互斥锁。 */
     if (s_deferred_msg_save) {
         s_deferred_msg_save = false;
         storage_save_messages(s_save_snap, s_save_count, s_save_idx);
-        ESP_LOGD(UI_TAG, "Deferred message save completed (%d msgs)", s_save_count);
     }
     if (s_deferred_brightness_save) {
         s_deferred_brightness_save = false;
         storage_save_brightness(s_save_brightness);
-        ESP_LOGD(UI_TAG, "Deferred brightness save completed (%d%%)", s_save_brightness);
     }
 }
 
 /* ================== Toast API ================== */
-
 void ui_show_toast(const char *msg, uint32_t auto_dismiss_ms) {
     if (!msg) return;
     strncpy(s_toast_msg, msg, TOAST_MSG_MAX - 1);
     s_toast_msg[TOAST_MSG_MAX - 1] = '\0';
-    s_toast_visible   = true;
+    s_toast_visible = true;
     s_toast_expire_ms = (auto_dismiss_ms > 0) ? (board_time_ms() + auto_dismiss_ms) : 0;
-    ui_request_redraw();
-    ESP_LOGD(UI_TAG, "Toast shown: \"%s\" (auto_dismiss=%ums)", s_toast_msg, auto_dismiss_ms);
+    ui_task_request_redraw();
 }
 
 bool ui_toast_is_visible(void) {
@@ -542,6 +350,39 @@ bool ui_toast_is_visible(void) {
 void ui_toast_dismiss(void) {
     if (s_toast_visible) {
         s_toast_visible = false;
-        ui_request_redraw();
+        ui_task_request_redraw();
     }
+}
+
+/* ================== 向后兼容接口 ================== */
+void ui_change_page(ui_state_enum_t new_state) {
+    // 临时兼容层，最终将移除
+    if (new_state == UI_STATE_MAIN) {
+        ui_navigate_to_page(ui_get_main_page(), NULL);
+    } else if (new_state == UI_STATE_MESSAGE_LIST) {
+        ui_navigate_to_page(ui_get_list_page(), NULL);
+    } else if (new_state == UI_STATE_MESSAGE_READ) {
+        ui_navigate_to_page(ui_get_message_page(), NULL);
+    } else if (new_state == UI_STATE_SETTINGS) {
+        ui_navigate_to_page(ui_get_settings_page(), NULL);
+    }
+}
+
+void ui_enter_standby(void) {
+    board_display_set_contrast(0);
+    board_leds_off();
+}
+
+void ui_wake_up(void) {
+    ui_navigate_to_page(ui_get_main_page(), NULL);
+    ui_update_activity();
+}
+
+bool ui_is_in_standby(void) {
+    return false;  // 新架构不使用 standby 状态
+}
+
+/* ================== 状态机导航包装 ================== */
+void ui_navigate_to_page(ui_page_base_t* page, void* params) {
+    ui_state_machine_navigate(page, params);
 }

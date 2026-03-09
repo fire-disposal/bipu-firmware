@@ -55,10 +55,7 @@ ui_page_base_t* ui_get_settings_page(void);
  * @param page 页面对象
  * @param params 参数（可选）
  */
-static inline void ui_navigate_to_page(ui_page_base_t* page, void* params)
-{
-    ui_state_machine_navigate(page, params);
-}
+void ui_navigate_to_page(ui_page_base_t* page, void* params);
 
 /**
  * @brief 返回上一页（新架构）
