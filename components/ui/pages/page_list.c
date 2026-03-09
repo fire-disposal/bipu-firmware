@@ -17,6 +17,15 @@ typedef struct {
 
 static list_page_context_t s_ctx = {0};
 
+/* ================== 渲染状态栏（统一风格） ================== */
+
+static void render_status_bar(void)
+{
+    ui_set_font(u8g2_font_wqy12_t_gb2312a);
+    ui_draw_text_centered(0, 10, 128, "消息列表");
+    ui_draw_rect(0, 12, 128, 1, true);
+}
+
 /* ================== 页面生命周期回调 ================== */
 
 static void page_list_on_enter(ui_page_base_t* page, void* params)
@@ -50,6 +59,11 @@ static void page_list_render(ui_page_base_t* page)
 {
     (void)page;
     
+    board_display_begin();
+    
+    // 渲染状态栏
+    render_status_bar();
+    
     // 准备列表数据
     static const char* list_items[20];
     int count = s_ctx.total_count < 20 ? s_ctx.total_count : 20;
@@ -68,16 +82,32 @@ static void page_list_render(ui_page_base_t* page)
         }
     }
     
-    ui_list_config_t config = {
-        .items = list_items,
-        .item_count = count,
-        .selected_index = s_ctx.selected_index,
-        .scroll_offset = s_ctx.scroll_offset,
-        .items_per_page = 4,
-        .title = "消息列表",
-    };
+    // 内容从 y=16 开始（状态栏下方）
+    const int content_start_y = 16;
+    const int line_height = 14;
     
-    ui_render_list(&config);
+    ui_set_font(u8g2_font_wqy12_t_gb2312a);
+    
+    for (int i = 0; i < 4; i++) {
+        int item_index = s_ctx.scroll_offset + i;
+        if (item_index >= count) break;
+        
+        int y = content_start_y + i * line_height + 12;
+        const char* item_text = list_items[item_index];
+        
+        // 选中项高亮
+        if (item_index == s_ctx.selected_index) {
+            ui_set_draw_color(1);
+            ui_draw_rect(0, y - 12, 128, line_height, true);
+            ui_set_draw_color(0);
+            ui_draw_text(4, y, item_text);
+        } else {
+            ui_set_draw_color(1);
+            ui_draw_text(4, y, item_text);
+        }
+    }
+    
+    board_display_end();
 }
 
 static void page_list_on_key(ui_page_base_t* page, board_key_t key)

@@ -15,6 +15,8 @@
 #include "freertos/queue.h"
 #include <string.h>
 
+static const char* TAG = "key";
+
 #define BUTTON_COUNT 4
 #define DEBOUNCE_TIME_MS 50
 #define REPEAT_DELAY_MS 500
@@ -111,6 +113,7 @@ static void process_button_state(int button, bool is_pressed, uint32_t timestamp
     board_key_t key = BOARD_KEY_NONE;
 
     if (is_pressed && !state->is_pressed) {
+        // 按键按下
         if (!state->debounce_active) {
             state->debounce_active = true;
             state->debounce_start_time = timestamp;
@@ -120,8 +123,10 @@ static void process_button_state(int button, bool is_pressed, uint32_t timestamp
             state->long_press_fired = false;
             state->repeat_enabled = false;
             state->debounce_active = false;
+            ESP_LOGD(TAG, "Key %d pressed (debounced)", button);
         }
     } else if (!is_pressed && state->is_pressed) {
+        // 按键释放
         if (!state->debounce_active) {
             state->debounce_active = true;
             state->debounce_start_time = timestamp;
@@ -129,6 +134,9 @@ static void process_button_state(int button, bool is_pressed, uint32_t timestamp
             uint32_t duration = timestamp - state->press_start_time;
             if (!state->long_press_fired && duration < LONG_PRESS_MS) {
                 key = s_short_map[button];
+                ESP_LOGD(TAG, "Key %d short press (%d ms)", button, duration);
+            } else if (state->long_press_fired) {
+                ESP_LOGD(TAG, "Key %d long press released (%d ms)", button, duration);
             }
             state->is_pressed = false;
             state->repeat_enabled = false;
@@ -155,6 +163,7 @@ static void process_button_state(int button, bool is_pressed, uint32_t timestamp
             state->repeat_enabled = true;
             state->last_repeat_time = timestamp;
             key = s_long_map[button];
+            ESP_LOGD(TAG, "Key %d long press detected", button);
             start_repeat_timer();
         }
     }
@@ -169,19 +178,21 @@ static void gpio_isr_wrapper(void* arg)
 {
     int button = (int)arg;
     bool level = gpio_get_level(s_button_gpios[button]);
-    uint32_t now = board_time_ms();
+    uint32_t now = (uint32_t)esp_timer_get_time() / 1000;  // 使用 esp_timer 更安全
     process_button_state(button, (level == 0), now);
 }
 
 void board_key_init(void)
 {
     if (s_keys_initialized) {
+        ESP_LOGW(TAG, "Already initialized");
         return;
     }
 
     /* 初始化队列 */
     s_key_queue = xQueueCreate(10, sizeof(board_key_t));
     if (s_key_queue == NULL) {
+        ESP_LOGE(TAG, "Failed to create key queue");
         return;
     }
 
@@ -203,11 +214,12 @@ void board_key_init(void)
     gpio_config(&io_conf);
 
     /* 读取初始状态 */
-    uint32_t init_time = board_time_ms();
+    uint32_t init_time = (uint32_t)esp_timer_get_time() / 1000;
     for (int i = 0; i < BUTTON_COUNT; i++) {
         bool raw_state = (gpio_get_level(s_button_gpios[i]) == 0);
         s_button_states[i].is_pressed = raw_state;
         s_button_states[i].press_start_time = init_time;
+        ESP_LOGD(TAG, "Key %d initial state: %d", i, raw_state);
     }
 
     /* 创建重复定时器 */
@@ -215,15 +227,26 @@ void board_key_init(void)
         .callback = &repeat_timer_cb,
         .name = "key_repeat_timer"
     };
-    esp_timer_create(&timer_args, &s_repeat_timer);
+    esp_err_t ret = esp_timer_create(&timer_args, &s_repeat_timer);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create repeat timer: %s", esp_err_to_name(ret));
+    }
 
     /* 注册中断处理函数 */
-    gpio_install_isr_service(0);
+    ret = gpio_install_isr_service(0);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ISR service already installed");
+    }
     for (int i = 0; i < BUTTON_COUNT; i++) {
-        gpio_isr_handler_add(s_button_gpios[i], gpio_isr_wrapper, (void*)i);
+        ret = gpio_isr_handler_add(s_button_gpios[i], gpio_isr_wrapper, (void*)i);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to add ISR handler for key %d", i);
+        }
     }
 
     s_keys_initialized = true;
+    ESP_LOGI(TAG, "Key driver initialized (UP=%d, DOWN=%d, ENTER=%d, BACK=%d)",
+             BOARD_GPIO_KEY_UP, BOARD_GPIO_KEY_DOWN, BOARD_GPIO_KEY_ENTER, BOARD_GPIO_KEY_BACK);
 }
 
 board_key_t board_key_poll(void)

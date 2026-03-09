@@ -18,6 +18,27 @@ typedef struct {
 
 static main_page_context_t s_ctx = {0};
 
+/* ================== 渲染状态栏（统一风格） ================== */
+
+static void render_status_bar(void)
+{
+    // 顶部分隔线
+    ui_set_font(u8g2_font_wqy12_t_gb2312a);
+    ui_draw_rect(0, 12, 128, 1, true);
+    
+    // 时间显示
+    time_t now;
+    time(&now);
+    struct tm *t = localtime(&now);
+    
+    if (t) {
+        char time_str[16];
+        snprintf(time_str, sizeof(time_str), "%02d:%02d", t->tm_hour, t->tm_min);
+        int time_width = board_display_text_width(time_str);
+        ui_draw_text(126 - time_width, 10, time_str);
+    }
+}
+
 /* ================== 页面生命周期回调 ================== */
 
 static void page_main_on_enter(ui_page_base_t* page, void* params)
@@ -26,6 +47,7 @@ static void page_main_on_enter(ui_page_base_t* page, void* params)
     ESP_LOGD(TAG, "Entering Main Page");
     s_ctx.total_msgs = 0;
     s_ctx.unread_msgs = 0;
+    s_ctx.last_update_time = 0;
     page_request_render(page);
 }
 
@@ -53,8 +75,11 @@ static void page_main_render(ui_page_base_t* page)
     (void)page;
     
     board_display_begin();
-    ui_render_status_bar(NULL);
     
+    // 渲染状态栏（顶部）
+    render_status_bar();
+    
+    // 主内容：时间和日期
     time_t now;
     time(&now);
     struct tm *t = localtime(&now);
@@ -79,6 +104,7 @@ static void page_main_render(ui_page_base_t* page)
         ui_draw_text_centered(0, 35, 128, "BIPI PAGER");
     }
     
+    // 未读消息提示（状态栏区域）
     if (s_ctx.unread_msgs > 0) {
         ui_set_font(u8g2_font_open_iconic_email_1x_t);
         ui_draw_glyph(115, 10, 0x0041);
@@ -141,8 +167,3 @@ ui_page_base_t* ui_get_main_page(void)
 {
     return &s_main_page;
 }
-
-// 临时包装器（直到其他页面迁移完成）
-ui_page_base_t* ui_get_list_page(void) { return NULL; }
-ui_page_base_t* ui_get_message_page(void) { return NULL; }
-ui_page_base_t* ui_get_settings_page(void) { return NULL; }

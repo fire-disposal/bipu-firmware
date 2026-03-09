@@ -16,6 +16,19 @@ typedef struct {
 
 static message_page_context_t s_ctx = {0};
 
+/* ================== 渲染状态栏（统一风格） ================== */
+
+static void render_status_bar(const char* center_text)
+{
+    ui_set_font(u8g2_font_wqy12_t_gb2312a);
+    
+    if (center_text != NULL && center_text[0] != '\0') {
+        ui_draw_text_centered(0, 10, 128, center_text);
+    }
+    
+    ui_draw_rect(0, 12, 128, 1, true);
+}
+
 /* ================== 页面生命周期回调 ================== */
 
 static void page_message_on_enter(ui_page_base_t* page, void* params)
@@ -57,7 +70,9 @@ static void page_message_render(ui_page_base_t* page)
     snprintf(page_str, sizeof(page_str), "[%d/%d]", idx + 1, ui_get_message_count());
     
     board_display_begin();
-    ui_render_status_bar(page_str);
+    
+    // 渲染状态栏
+    render_status_bar(page_str);
     
     // 发送者
     ui_set_font(u8g2_font_open_iconic_human_1x_t);

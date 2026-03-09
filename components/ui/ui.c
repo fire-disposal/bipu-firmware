@@ -18,7 +18,12 @@ static SemaphoreHandle_t s_ui_mutex = NULL;
 
 static inline bool ui_lock(void) {
     if (s_ui_mutex == NULL) return true;
-    return xSemaphoreTake(s_ui_mutex, pdMS_TO_TICKS(200)) == pdTRUE;
+    // 增加超时时间到 1 秒，减少误报
+    if (xSemaphoreTake(s_ui_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE("ui", "Failed to acquire UI lock!");
+        return false;
+    }
+    return true;
 }
 
 static inline void ui_unlock(void) {
@@ -34,6 +39,14 @@ static storage_message_t s_save_snap[MAX_MESSAGES];
 static int  s_save_count;
 static int  s_save_idx;
 static uint8_t s_save_brightness;
+
+/* NVS 写入频率限制：两次保存之间最小间隔 (ms) */
+#define NVS_SAVE_INTERVAL_MS  2000
+static uint32_t s_last_msg_save_time = 0;
+static uint32_t s_last_brightness_save_time = 0;
+
+/* BLE 重连后需要同步的状态 */
+static bool s_pending_ble_resync = false;
 
 /* ================== Toast 状态 ================== */
 #define TOAST_MSG_MAX 64
@@ -85,11 +98,6 @@ static void ui_update_activity(void) {
     s_ui_data.last_activity_time = board_time_ms();
 }
 
-/* ================== GUI 任务重绘回调 ================== */
-static void ui_redraw_callback_wrapper(void) {
-    ui_task_request_redraw();
-}
-
 /* ================== Toast 预刷新钩子 ================== */
 static void toast_pre_flush_cb(void) {
     if (s_toast_visible) {
@@ -114,7 +122,6 @@ void ui_init(void) {
     
     // 启动 GUI 任务
     ui_task_start();
-    ui_task_set_redraw_callback(ui_redraw_callback_wrapper);
 
     // 加载 NVS 数据
     if (storage_init() == ESP_OK) {
@@ -229,7 +236,7 @@ void ui_show_message_with_timestamp(const char* sender, const char* text, uint32
 
     s_ui_data.current_msg_idx = s_ui_data.message_count - 1;
 
-    // 快照消息数组
+    // 快照消息数组（标记待保存，但不立即写入）
     memcpy(s_save_snap, s_ui_data.messages, sizeof(storage_message_t) * s_ui_data.message_count);
     s_save_count = s_ui_data.message_count;
     s_save_idx = s_ui_data.current_msg_idx;
@@ -237,8 +244,7 @@ void ui_show_message_with_timestamp(const char* sender, const char* text, uint32
 
     ui_unlock();
 
-    // NVS 持久化（锁外）
-    storage_save_messages(s_save_snap, s_save_count, s_save_idx);
+    // NVS 持久化改为由 app_loop 定期批量保存（见 ui_flush_pending_saves）
 
     // 导航到消息页面并通知硬件
     ui_navigate_to_page(ui_get_message_page(), NULL);
@@ -321,16 +327,86 @@ void ui_system_restart(void) {
     board_system_restart();
 }
 
-/* ================== 延迟 NVS 持久化 ================== */
-void ui_flush_pending_saves(void) {
+/* ================== 延迟 NVS 持久化（带频率限制） ================== */
+void ui_flush_pending_saves(void)
+{
+    uint32_t now = board_time_ms();
+    
+    // 消息保存（频率限制：2 秒间隔）
+    if (s_deferred_msg_save) {
+        if (now - s_last_msg_save_time >= NVS_SAVE_INTERVAL_MS) {
+            s_deferred_msg_save = false;
+            s_last_msg_save_time = now;
+            storage_save_messages(s_save_snap, s_save_count, s_save_idx);
+            ESP_LOGD("ui", "NVS save: %d messages", s_save_count);
+        }
+    }
+    
+    // 亮度保存（频率限制：2 秒间隔）
+    if (s_deferred_brightness_save) {
+        if (now - s_last_brightness_save_time >= NVS_SAVE_INTERVAL_MS) {
+            s_deferred_brightness_save = false;
+            s_last_brightness_save_time = now;
+            storage_save_brightness(s_save_brightness);
+            ESP_LOGD("ui", "NVS save: brightness=%d", s_save_brightness);
+        }
+    }
+}
+
+/* 强制立即保存所有待存数据（页面切换/退出时调用） */
+void ui_flush_pending_saves_force(void)
+{
     if (s_deferred_msg_save) {
         s_deferred_msg_save = false;
+        s_last_msg_save_time = board_time_ms();
         storage_save_messages(s_save_snap, s_save_count, s_save_idx);
     }
     if (s_deferred_brightness_save) {
         s_deferred_brightness_save = false;
+        s_last_brightness_save_time = board_time_ms();
         storage_save_brightness(s_save_brightness);
     }
+}
+
+/* 标记需要 NVS 保存（供外部调用） */
+void ui_request_nvs_save(void)
+{
+    if (!ui_lock()) return;
+    
+    memcpy(s_save_snap, s_ui_data.messages, sizeof(storage_message_t) * s_ui_data.message_count);
+    s_save_count = s_ui_data.message_count;
+    s_save_idx = s_ui_data.current_msg_idx;
+    s_deferred_msg_save = true;
+    
+    ui_unlock();
+}
+
+/* 查询是否有待保存的 NVS 数据 */
+bool ui_has_pending_saves(void)
+{
+    return s_deferred_msg_save || s_deferred_brightness_save;
+}
+
+/* BLE 重连后恢复状态 */
+void ui_on_ble_reconnected(void)
+{
+    ESP_LOGI("ui", "BLE reconnected, resyncing state");
+    
+    /* 强制保存当前状态（防止断开期间数据丢失） */
+    ui_flush_pending_saves_force();
+    
+    /* 重置重连标记 */
+    s_pending_ble_resync = false;
+    
+    /* 刷新显示（可选：显示连接恢复提示） */
+    ui_request_redraw();
+}
+
+/* ================== 导航接口实现 ================== */
+
+void ui_go_back_page(void)
+{
+    ui_state_go_back();
 }
 
 /* ================== Toast API ================== */
@@ -358,4 +434,10 @@ void ui_toast_dismiss(void) {
 void ui_navigate_to_page(ui_page_base_t* page, void* params)
 {
     ui_state_machine_navigate(page, params);
+}
+
+/* ================== 重绘接口包装（供 app 层使用） ================== */
+void ui_request_redraw(void)
+{
+    ui_task_request_redraw();
 }

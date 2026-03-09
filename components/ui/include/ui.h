@@ -70,14 +70,9 @@ void ui_go_back_page(void);
 
 /**
  * @brief 请求重绘 UI
+ * 线程安全，可在任意任务/中断上下文中调用
  */
 void ui_request_redraw(void);
-
-/**
- * @brief 设置重绘回调函数
- * @param cb 回调函数，通常用于唤醒 GUI 任务
- */
-void ui_set_redraw_callback(void (*cb)(void));
 
 /* ================== 消息数据接口 ================== */
 
@@ -174,8 +169,33 @@ uint32_t ui_get_last_activity_time(void);
 /**
  * @brief 刷新待执行的延迟 NVS 持久化
  * 必须在 app_task 上下文中、非锁内调用
+ * 带有频率限制（2 秒间隔），避免频繁写入
  */
 void ui_flush_pending_saves(void);
+
+/**
+ * @brief 强制立即保存所有待存 NVS 数据
+ * 在页面切换/退出等关键时刻调用，确保数据不丢失
+ */
+void ui_flush_pending_saves_force(void);
+
+/**
+ * @brief 请求 NVS 保存（标记待保存）
+ * 通常由页面层调用，实际写入由 ui_flush_pending_saves 执行
+ */
+void ui_request_nvs_save(void);
+
+/**
+ * @brief 查询是否有待保存的 NVS 数据
+ * @return true 有待保存数据
+ */
+bool ui_has_pending_saves(void);
+
+/**
+ * @brief BLE 重连后恢复 UI 状态
+ * 由 ble_manager 调用，恢复同步状态
+ */
+void ui_on_ble_reconnected(void);
 
 /* ================== Toast 提示 ================== */
 

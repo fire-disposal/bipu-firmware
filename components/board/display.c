@@ -24,7 +24,8 @@ void board_display_set_pre_flush_cb(void (*cb)(void)) {
 // 显示互斥锁操作
 static inline bool display_lock(void) {
     if (s_display_mutex == NULL) return true;
-    return xSemaphoreTake(s_display_mutex, pdMS_TO_TICKS(500)) == pdTRUE;
+    // 增加超时时间到 1 秒
+    return xSemaphoreTake(s_display_mutex, pdMS_TO_TICKS(1000)) == pdTRUE;
 }
 
 static inline void display_unlock(void) {
@@ -187,7 +188,7 @@ void board_display_begin(void) {
         return;
     }
     if (!display_lock()) {
-        ESP_LOGW(BOARD_TAG, "Failed to lock display for begin");
+        ESP_LOGE(BOARD_TAG, "Failed to lock display for begin (deadlock?)");
         return;
     }
     u8g2_ClearBuffer(&s_u8g2);

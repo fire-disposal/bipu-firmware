@@ -8,18 +8,7 @@
 #include <time.h>
 #include <math.h>
 
-static const char* TAG = "ui_render";
-
 /* ================== 内部辅助函数 ================== */
-
-static int prev_utf8_start(const char *s, int idx) {
-    while (idx > 0) {
-        idx--;
-        if (((unsigned char)s[idx] & 0xC0) != 0x80)
-            break;
-  }
-  return idx;
-}
 
 /* ================== 基础绘制原语实现 ================== */
 
@@ -84,22 +73,6 @@ void ui_set_font_mode(uint8_t mode)
 
 /* ================== 高级组件实现 ================== */
 
-void ui_render_status_bar(const char* center_text)
-{
-    board_display_begin();
-    
-    // 顶部分隔线
-    ui_draw_rect(0, 12, 128, 1, true);
-    
-    // 中间文字（如果有）
-    if (center_text != NULL && center_text[0] != '\0') {
-        ui_set_font(u8g2_font_wqy12_t_gb2312a);
-        ui_draw_text_centered(0, 10, 128, center_text);
-    }
-    
-    // 状态栏固定在顶部，实际内容从 y=14 开始
-}
-
 void ui_render_list(ui_list_config_t* config)
 {
     if (config == NULL) return;
@@ -118,7 +91,6 @@ void ui_render_list(ui_list_config_t* config)
     const int line_height = 14;
     const int items_per_page = config->items_per_page > 0 ? 
                                config->items_per_page : 4;
-    const int total_height = items_per_page * line_height;
     
     // 自动滚动逻辑
     int scroll_offset = config->scroll_offset;

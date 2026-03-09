@@ -4,6 +4,7 @@
 #include "u8g2.h"
 #include "esp_log.h"
 #include <stdio.h>
+#include "ble_manager.h"
 
 static const char* TAG = "page_settings";
 
@@ -31,8 +32,12 @@ static const char* s_setting_names[] = {
     "← 返回"
 };
 
-/* ================== 页面上下文 ================== */
+/* 页面配置常量（参考旧版本最佳视觉效果） */
+#define ITEMS_PER_PAGE     4     /* 每页显示数量 */
+#define LINE_HEIGHT        12    /* 行高 */
+#define CONTENT_START_Y    24    /* 内容起始 Y 坐标 */
 
+/* ================== 页面上下文 ================== */
 typedef struct {
     int selected_item;
     bool editing;
@@ -43,6 +48,116 @@ typedef struct {
 } settings_page_context_t;
 
 static settings_page_context_t s_ctx = {0};
+
+/* ================== 辅助渲染函数 ================== */
+
+static void render_about_page(void)
+{
+    board_display_begin();
+    ui_set_font(u8g2_font_wqy12_t_gb2312a);
+    
+    // 标题栏
+    ui_draw_rect(0, 12, 128, 1, true);
+    ui_draw_text_centered(0, 10, 128, "关于设备");
+    
+    // 设备信息
+    ui_draw_text(4, 26, "BIPI Pager");
+    ui_draw_text(4, 40, "固件版本：" FW_VERSION);
+    ui_draw_text(4, 54, "ESP32-C3 BLE");
+    
+    board_display_end();
+}
+
+static void render_unbind_confirm_page(void)
+{
+    board_display_begin();
+    ui_set_font(u8g2_font_wqy12_t_gb2312a);
+    
+    // 标题栏
+    ui_draw_rect(0, 12, 128, 1, true);
+    ui_draw_text_centered(0, 10, 128, "解绑确认");
+    
+    // 确认信息
+    ui_draw_text(4, 26, "确定要解绑设备吗？");
+    ui_draw_text(4, 40, "解绑后需要重新绑定");
+    ui_draw_text(4, 54, "才能使用蓝牙功能");
+    
+    // 操作提示
+    ui_draw_text(4, 68, "确认：上键");
+    ui_draw_text(64, 68, "取消：下键");
+    
+    board_display_end();
+}
+
+static void render_settings_page(void)
+{
+    board_display_begin();
+    ui_set_font(u8g2_font_wqy12_t_gb2312a);
+    
+    // 标题栏
+    ui_draw_rect(0, 12, 128, 1, true);
+    ui_draw_text_centered(0, 10, 128, "设置");
+    
+    // 计算当前页码和起始项（分页显示）
+    int page = s_ctx.selected_item / ITEMS_PER_PAGE;
+    int start_item = page * ITEMS_PER_PAGE;
+    int end_item = start_item + ITEMS_PER_PAGE;
+    if (end_item > SETTING_COUNT) end_item = SETTING_COUNT;
+    
+    // 渲染当前页的选项
+    int y = CONTENT_START_Y;
+    for (int i = start_item; i < end_item; i++) {
+        // 选中标记：使用 › 符号 + 反色背景
+        if (i == s_ctx.selected_item) {
+            // 选中行反色：白色背景 + 黑色文字
+            ui_set_draw_color(1);
+            ui_draw_rect(0, y - LINE_HEIGHT + 2, 128, LINE_HEIGHT, true);
+            ui_set_draw_color(0);
+            ui_draw_text(2, y, "›");
+        }
+        
+        // 设置项名称
+        ui_draw_text(12, y, s_setting_names[i]);
+        
+        // 显示当前值
+        char value_str[32];
+        switch (i) {
+            case SETTING_BRIGHTNESS: {
+                if (s_ctx.editing && i == s_ctx.selected_item) {
+                    // 编辑模式：显示调节指示
+                    snprintf(value_str, sizeof(value_str), "‹%d%%›", s_ctx.brightness);
+                } else {
+                    snprintf(value_str, sizeof(value_str), "%d%%", s_ctx.brightness);
+                }
+                int tw = board_display_text_width(value_str);
+                ui_draw_text(124 - tw, y, value_str);
+                break;
+            }
+            case SETTING_FLASHLIGHT: {
+                const char* state = s_ctx.flashlight_on ? "开" : "关";
+                int tw = board_display_text_width(state);
+                ui_draw_text(124 - tw, y, state);
+                break;
+            }
+            case SETTING_LOCKSCREEN:
+            case SETTING_UNBIND:
+            case SETTING_RESTART:
+            case SETTING_ABOUT:
+            case SETTING_BACK:
+                // 无值显示
+                break;
+        }
+        
+        // 恢复正常绘制模式
+        if (i == s_ctx.selected_item) {
+            ui_set_draw_color(1);
+        }
+        
+        y += LINE_HEIGHT;
+    }
+    
+    board_display_end();
+}
 
 /* ================== 页面生命周期回调 ================== */
 
@@ -68,190 +183,160 @@ static void page_settings_on_exit(ui_page_base_t* page)
     s_ctx.show_unbind_confirm = false;
 }
 
-static void render_about(ui_page_base_t* page)
-{
-    (void)page;
-    board_display_begin();
-    ui_set_font(u8g2_font_wqy12_t_gb2312a);
-    
-    ui_draw_rect(0, 12, 128, 1, true);
-    ui_draw_text_centered(0, 10, 128, "关于设备");
-    
-    ui_draw_text(4, 26, "BIPI Pager");
-    ui_draw_text(4, 40, "固件版本：" FW_VERSION);
-    ui_draw_text(4, 54, "ESP32-C3 BLE");
-    
-    board_display_end();
-}
-
-static void render_unbind_confirm(ui_page_base_t* page)
-{
-    (void)page;
-    board_display_begin();
-    ui_set_font(u8g2_font_wqy12_t_gb2312a);
-    
-    ui_draw_rect(0, 12, 128, 1, true);
-    ui_draw_text_centered(0, 10, 128, "解绑确认");
-    
-    ui_draw_text(10, 30, "确定要解绑设备吗？");
-    
-    ui_draw_rect(10, 45, 50, 14, false);
-    ui_draw_text_centered(10, 54, 50, "确定");
-    
-    ui_draw_rect(70, 45, 50, 14, false);
-    ui_draw_text_centered(70, 54, 50, "取消");
-    
-    board_display_end();
-}
-
 static void page_settings_render(ui_page_base_t* page)
 {
+    (void)page;
+    
     if (s_ctx.show_about) {
-        render_about(page);
+        render_about_page();
         return;
     }
     
     if (s_ctx.show_unbind_confirm) {
-        render_unbind_confirm(page);
+        render_unbind_confirm_page();
         return;
     }
     
-    board_display_begin();
-    
-    // 标题
-    ui_set_font(u8g2_font_wqy12_t_gb2312a);
-    ui_draw_rect(0, 12, 128, 1, true);
-    ui_draw_text_centered(0, 10, 128, "设置");
-    
-    // 渲染设置列表
-    const int line_height = 14;
-    const int start_y = 16;
-    
-    for (int i = 0; i < SETTING_COUNT; i++) {
-        int y = start_y + i * line_height;
-        
-        if (i == s_ctx.selected_item) {
-            // 选中项反色
-            ui_set_draw_color(1);
-            ui_draw_rect(0, y - 12, 128, line_height, true);
-            ui_set_draw_color(0);
-            
-            // 亮度项显示当前值
-            if (i == SETTING_BRIGHTNESS) {
-                char buf[32];
-                snprintf(buf, sizeof(buf), "%s: %d%%", s_setting_names[i], s_ctx.brightness);
-                ui_draw_text(4, y, buf);
-            } else if (i == SETTING_FLASHLIGHT) {
-                char buf[32];
-                snprintf(buf, sizeof(buf), "%s: %s", s_setting_names[i], s_ctx.flashlight_on ? "开" : "关");
-                ui_draw_text(4, y, buf);
-            } else {
-                ui_draw_text(4, y, s_setting_names[i]);
-            }
-        } else {
-            ui_set_draw_color(1);
-            if (i == SETTING_BRIGHTNESS) {
-                char buf[32];
-                snprintf(buf, sizeof(buf), "%s: %d%%", s_setting_names[i], s_ctx.brightness);
-                ui_draw_text(4, y, buf);
-            } else if (i == SETTING_FLASHLIGHT) {
-                char buf[32];
-                snprintf(buf, sizeof(buf), "%s: %s", s_setting_names[i], s_ctx.flashlight_on ? "开" : "关");
-                ui_draw_text(4, y, buf);
-            } else {
-                ui_draw_text(4, y, s_setting_names[i]);
-            }
-        }
-    }
-    
-    board_display_end();
+    render_settings_page();
 }
 
 static void page_settings_on_key(ui_page_base_t* page, board_key_t key)
 {
-    // 关于页面按键处理
+    ESP_LOGD(TAG, "Settings key: %d, editing: %d, about: %d, unbind: %d", 
+             key, s_ctx.editing, s_ctx.show_about, s_ctx.show_unbind_confirm);
+    
+    // 关于页面：任意键返回
     if (s_ctx.show_about) {
-        if (key == BOARD_KEY_BACK || key == BOARD_KEY_ENTER) {
-            s_ctx.show_about = false;
-            page_request_render(page);
-        }
+        s_ctx.show_about = false;
+        page_request_render(page);
         return;
     }
     
-    // 解绑确认页面按键处理
+    // 解绑确认页面
     if (s_ctx.show_unbind_confirm) {
-        if (key == BOARD_KEY_ENTER || key == BOARD_KEY_DOWN) {
-            // 确定解绑
+        if (key == BOARD_KEY_UP) {
+            // 确认解绑
+            ESP_LOGI(TAG, "用户确认解绑设备");
             ble_manager_unpair();
-            ui_show_toast("已解绑", 1500);
             s_ctx.show_unbind_confirm = false;
+            ui_show_toast("解绑成功，即将重启", 2000);
             ui_go_back_page();
-        } else if (key == BOARD_KEY_BACK || key == BOARD_KEY_UP) {
-            // 取消
+        } else if (key == BOARD_KEY_DOWN || key == BOARD_KEY_BACK) {
+            // 取消解绑
+            ESP_LOGI(TAG, "用户取消解绑");
             s_ctx.show_unbind_confirm = false;
+            ui_show_toast("已取消", 1200);
             page_request_render(page);
         }
         return;
     }
     
-    // 主设置页面按键处理
-    switch (key) {
-        case BOARD_KEY_BACK:
-            ui_go_back_page();
-            break;
-            
-        case BOARD_KEY_DOWN:
-            if (s_ctx.selected_item < SETTING_COUNT - 1) {
-                s_ctx.selected_item++;
-                page_request_render(page);
+    if (s_ctx.editing) {
+        // 编辑模式
+        switch (s_ctx.selected_item) {
+            case SETTING_BRIGHTNESS: {
+                if (key == BOARD_KEY_UP) {
+                    if (s_ctx.brightness < 100) {
+                        s_ctx.brightness += 10;
+                        if (s_ctx.brightness > 100) s_ctx.brightness = 100;
+                        ui_set_brightness(s_ctx.brightness);
+                        char buf[20];
+                        snprintf(buf, sizeof(buf), "亮度：%d%%", s_ctx.brightness);
+                        ui_show_toast(buf, 1200);
+                        page_request_render(page);
+                    }
+                } else if (key == BOARD_KEY_DOWN) {
+                    if (s_ctx.brightness > 10) {
+                        s_ctx.brightness -= 10;
+                        if (s_ctx.brightness < 10) s_ctx.brightness = 10;
+                        ui_set_brightness(s_ctx.brightness);
+                        char buf[20];
+                        snprintf(buf, sizeof(buf), "亮度：%d%%", s_ctx.brightness);
+                        ui_show_toast(buf, 1200);
+                        page_request_render(page);
+                    }
+                } else if (key == BOARD_KEY_ENTER || key == BOARD_KEY_BACK) {
+                    // 退出编辑模式
+                    s_ctx.editing = false;
+                }
+                break;
             }
-            break;
-            
-        case BOARD_KEY_UP:
-            if (s_ctx.selected_item > 0) {
+            default:
+                s_ctx.editing = false;
+                break;
+        }
+    } else {
+        // 选择模式
+        switch (key) {
+            case BOARD_KEY_UP:
                 s_ctx.selected_item--;
+                if (s_ctx.selected_item < 0) s_ctx.selected_item = SETTING_COUNT - 1;
                 page_request_render(page);
-            }
-            break;
-            
-        case BOARD_KEY_ENTER:
-            switch (s_ctx.selected_item) {
-                case SETTING_BRIGHTNESS:
-                    // 循环切换亮度
-                    uint8_t new_brightness = (s_ctx.brightness + 10) % 91 + 10;  // 10-100%
-                    ui_set_brightness(new_brightness);
-                    s_ctx.brightness = new_brightness;
-                    page_request_render(page);
-                    break;
-                    
-                case SETTING_FLASHLIGHT:
+                break;
+                
+            case BOARD_KEY_DOWN:
+                s_ctx.selected_item++;
+                if (s_ctx.selected_item >= SETTING_COUNT) s_ctx.selected_item = 0;
+                page_request_render(page);
+                break;
+                
+            case BOARD_KEY_ENTER:
+                switch (s_ctx.selected_item) {
+                    case SETTING_BRIGHTNESS:
+                        // 进入亮度编辑模式
+                        s_ctx.editing = true;
+                        break;
+                    case SETTING_FLASHLIGHT:
+                        ui_toggle_flashlight();
+                        s_ctx.flashlight_on = ui_is_flashlight_on();
+                        ui_show_toast(s_ctx.flashlight_on ? "手电筒 已开启" : "手电筒 已关闭", 1500);
+                        page_request_render(page);
+                        break;
+                    case SETTING_LOCKSCREEN:
+                        // 立即进入屏保/锁屏
+                        ui_show_toast("锁屏", 800);
+                        // 这里可以添加锁屏逻辑
+                        break;
+                    case SETTING_UNBIND:
+                        // 显示解绑确认页面
+                        s_ctx.show_unbind_confirm = true;
+                        page_request_render(page);
+                        break;
+                    case SETTING_RESTART:
+                        ui_show_toast("重启中...", 500);
+                        ui_system_restart();
+                        break;
+                    case SETTING_ABOUT:
+                        s_ctx.show_about = true;
+                        page_request_render(page);
+                        break;
+                    case SETTING_BACK:
+                        ui_go_back_page();
+                        break;
+                }
+                break;
+                
+            case BOARD_KEY_BACK:
+                ui_go_back_page();
+                break;
+                
+            case BOARD_KEY_BACK_LONG:
+                // 长按返回键：手电筒快速开关
+                if (ui_is_flashlight_on()) {
                     ui_toggle_flashlight();
-                    s_ctx.flashlight_on = ui_is_flashlight_on();
-                    page_request_render(page);
-                    break;
-                    
-                case SETTING_UNBIND:
-                    s_ctx.show_unbind_confirm = true;
-                    page_request_render(page);
-                    break;
-                    
-                case SETTING_RESTART:
-                    ui_system_restart();
-                    break;
-                    
-                case SETTING_ABOUT:
-                    s_ctx.show_about = true;
-                    page_request_render(page);
-                    break;
-                    
-                case SETTING_BACK:
-                    ui_go_back_page();
-                    break;
-            }
-            break;
-            
-        default:
-            break;
+                    s_ctx.flashlight_on = false;
+                    ui_show_toast("手电筒 关闭", 1000);
+                } else {
+                    ui_toggle_flashlight();
+                    s_ctx.flashlight_on = true;
+                    ui_show_toast("手电筒 开启", 1000);
+                }
+                page_request_render(page);
+                break;
+                
+            default:
+                break;
+        }
     }
 }
 

@@ -122,6 +122,21 @@ void ble_manager_set_time_sync_callback(ble_time_sync_callback_t callback);
 void ble_manager_set_connection_callback(ble_connection_callback_t callback);
 
 /**
+ * @brief 设置重连后恢复回调（可选）
+ * 
+ * 当 BLE 意外断开并重连后，此回调会被调用，用于恢复上层状态
+ * 
+ * @param callback 回调函数指针
+ */
+void ble_manager_set_reconnect_callback(void (*cb)(void));
+
+/**
+ * @brief 获取重连次数
+ * @return uint32_t 重连次数统计
+ */
+uint32_t ble_manager_get_reconnect_count(void);
+
+/**
  * @brief 检查蓝牙是否已连接
  *
  * @return true 已连接
@@ -168,6 +183,13 @@ uint16_t ble_manager_get_conn_id(void);
  * @return esp_err_t ESP_OK 成功，其他值失败
  */
 esp_err_t ble_manager_disconnect(void);
+
+/**
+ * @brief 解除配对（清除绑定信息并断开连接）
+ *
+ * @return esp_err_t ESP_OK 成功，其他值失败
+ */
+esp_err_t ble_manager_unpair(void);
 
 
 /**

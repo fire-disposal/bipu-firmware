@@ -4,8 +4,6 @@ idf_component_register(
         "ui_task.c"
         "ui_state_machine.c"
         "ui_render.c"
-        "ui_status.c"
-        "ui_text.c"
         "pages/page_base.c"
         "pages/page_main.c"
         "pages/page_list.c"

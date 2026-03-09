@@ -13,20 +13,21 @@
 #include "ble_manager.h"
 #include "bipupu_protocol.h"
 #include "board.h"
-
+#include "esp_log.h"
+#include "esp_err.h"
+#include "esp_nimble_hci.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
+#include "host/ble_hs_id.h"
 #include "host/util/util.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
-
-#include "esp_log.h"
-#include "esp_nimble_hci.h"
-#include "esp_mac.h"
 #include "nvs_flash.h"
+#include "esp_mac.h"
+#include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -107,6 +108,11 @@ bool ble_is_connected = false;
 static ble_message_callback_t s_message_callback = NULL;
 static ble_time_sync_callback_t s_time_sync_callback = NULL;
 static ble_connection_callback_t s_connection_callback = NULL;
+
+/* 重连计数和状态恢复回调 */
+static uint32_t s_reconnect_count = 0;
+static uint32_t s_last_disconnect_time = 0;
+static void (*s_on_reconnect_cb)(void) = NULL;
 
 
 /* ================== 私有函数声明 ================== */
@@ -482,14 +488,32 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     switch (event->type) {
         case BLE_GAP_EVENT_CONNECT:
             if (event->connect.status == 0) {
+                bool was_connected = s_ble_connected;
                 s_ble_connected = true;
                 ble_is_connected = true;
                 s_conn_handle = event->connect.conn_handle;
                 update_ble_state(BLE_STATE_CONNECTED);
 
+                if (was_connected) {
+                    /* 异常重连（不应发生），记录日志 */
+                    ESP_LOGW(TAG, "Reconnected unexpectedly, reconnect_count=%u", s_reconnect_count);
+                } else {
+                    /* 正常首次连接 */
+                    ESP_LOGI(TAG, "Connected, reconnect_count=%u", s_reconnect_count);
+                }
+
                 if (s_connection_callback) {
                     s_connection_callback(true);
                 }
+                
+                /* 调用重连回调（如有） */
+                if (was_connected && s_on_reconnect_cb) {
+                    s_on_reconnect_cb();
+                }
+            } else {
+                /* 连接失败，恢复广播 */
+                ESP_LOGW(TAG, "Connect failed status=%d, re-advertising", event->connect.status);
+                ble_advertise();
             }
             break;
 
@@ -497,11 +521,17 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             s_ble_connected = false;
             ble_is_connected = false;
             s_conn_handle = 0xFFFF;
+            s_last_disconnect_time = board_time_ms();
+            s_reconnect_count++;
             update_ble_state(BLE_STATE_IDLE);
+
+            ESP_LOGI(TAG, "Disconnected, total_reconnects=%u", s_reconnect_count);
 
             if (s_connection_callback) {
                 s_connection_callback(false);
             }
+            
+            /* 自动恢复广播，等待重连 */
             ble_advertise();
             break;
 
@@ -525,6 +555,8 @@ static void ble_advertise(void)
     struct ble_hs_adv_fields fields;
     int rc;
 
+    ESP_LOGD(TAG, "Starting BLE advertisement: %s", s_device_name);
+
     memset(&fields, 0, sizeof(fields));
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
     fields.tx_pwr_lvl_is_present = 1;
@@ -535,6 +567,8 @@ static void ble_advertise(void)
 
     rc = ble_gap_adv_set_fields(&fields);
     if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to set advertisement fields: rc=%d (0x%x)", rc, rc);
+        update_ble_state(BLE_STATE_ERROR);
         return;
     }
 
@@ -544,14 +578,20 @@ static void ble_advertise(void)
     adv_params.itvl_min = BLE_GAP_ADV_ITVL_MS(ADV_INTERVAL_MIN_MS);
     adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(ADV_INTERVAL_MAX_MS);
 
+    ESP_LOGD(TAG, "Starting BLE advertising (interval: %d-%d ms)", 
+             ADV_INTERVAL_MIN_MS, ADV_INTERVAL_MAX_MS);
+    
     rc = ble_gap_adv_start(s_own_addr_type, NULL, ADV_DURATION_SEC,
                           &adv_params, ble_gap_event, NULL);
     if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to start advertising: rc=%d (0x%x)", rc, rc);
         s_error_count++;
+        update_ble_state(BLE_STATE_ERROR);
         return;
     }
 
     update_ble_state(BLE_STATE_ADVERTISING);
+    ESP_LOGI(TAG, "BLE advertising started successfully");
 }
 
 static void ble_host_task(void *param)
@@ -564,44 +604,133 @@ static void ble_host_task(void *param)
 
 esp_err_t ble_manager_init(void)
 {
+    ESP_LOGI(TAG, "Initializing BLE...");
+    
     if (s_ble_state != BLE_STATE_UNINITIALIZED) {
+        ESP_LOGW(TAG, "BLE already initialized, state=%d", s_ble_state);
         return ESP_OK;
+    }
+
+    /* 0. 等待 NVS 完全就绪（防止 HCI 初始化失败） */
+    ESP_LOGD(TAG, "Waiting for NVS to be ready...");
+    int wait_count = 0;
+    while (wait_count < 10) {
+        nvs_handle_t test_handle;
+        esp_err_t test_ret = nvs_open("storage", NVS_READONLY, &test_handle);
+        if (test_ret == ESP_OK) {
+            nvs_close(test_handle);
+            ESP_LOGD(TAG, "NVS is ready (waited %d tries)", wait_count + 1);
+            break;
+        }
+        wait_count++;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (wait_count >= 10) {
+        ESP_LOGW(TAG, "NVS may not be fully ready, continuing anyway");
     }
 
     s_ble_state = BLE_STATE_IDLE;
 
-    esp_err_t ret = esp_nimble_hci_init();
+    /* 1. 释放经典蓝牙内存（我们只使用BLE） */
+    ESP_LOGD(TAG, "Releasing classic BT memory...");
+    esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+
+    /* 2. 初始化蓝牙控制器 */
+    ESP_LOGD(TAG, "Initializing BT controller...");
+    
+    /* 检查蓝牙初始化前置条件 */
+    ESP_LOGD(TAG, "Pre-init check: BT enabled=%d, Controller enabled=%d", 
+             CONFIG_BT_ENABLED, CONFIG_BT_CONTROLLER_ENABLED);
+    ESP_LOGD(TAG, "Pre-init check: Free heap: %d bytes", esp_get_free_heap_size());
+    
+    /* 蓝牙控制器配置 */
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    bt_cfg.mode = ESP_BT_MODE_BLE;
+    
+    esp_err_t ret = esp_bt_controller_init(&bt_cfg);
     if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "BT controller init failed: %s (0x%x)", esp_err_to_name(ret), ret);
+        ESP_LOGE(TAG, "Free heap after failed init: %d bytes", esp_get_free_heap_size());
         update_ble_state(BLE_STATE_ERROR);
         return ret;
     }
+    ESP_LOGD(TAG, "BT controller init success");
 
+    /* 3. 使能蓝牙控制器 */
+    ESP_LOGD(TAG, "Enabling BT controller...");
+    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "BT controller enable failed: %s (0x%x)", esp_err_to_name(ret), ret);
+        esp_bt_controller_deinit();
+        update_ble_state(BLE_STATE_ERROR);
+        return ret;
+    }
+    ESP_LOGD(TAG, "BT controller enabled");
+
+    /* 4. 初始化 HCI 控制器 */
+    ESP_LOGD(TAG, "Initializing HCI controller...");
+    ret = esp_nimble_hci_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "HCI 初始化失败：%s (0x%x)", esp_err_to_name(ret), ret);
+        ESP_LOGE(TAG, "Free heap after failed init: %d bytes", esp_get_free_heap_size());
+        ESP_LOGE(TAG, "可能原因：BT 控制器未正确配置或缺少 firmware");
+        esp_bt_controller_disable();
+        esp_bt_controller_deinit();
+        update_ble_state(BLE_STATE_ERROR);
+        return ret;
+    }
+    ESP_LOGD(TAG, "HCI 初始化成功");
+    ESP_LOGD(TAG, "Free heap after HCI init: %d bytes", esp_get_free_heap_size());
+
+    /* 2. 初始化 NimBLE 协议栈 */
+    ESP_LOGD(TAG, "Initializing NimBLE protocol stack...");
     nimble_port_init();
     ble_svc_gap_init();
     ble_svc_gatt_init();
+    ESP_LOGD(TAG, "NimBLE 初始化成功");
 
+    /* 3. 配置 GATT 服务表 */
+    ESP_LOGD(TAG, "Configuring GATT services...");
     int rc = ble_gatts_count_cfg(nus_gatt_svcs);
     if (rc != 0) {
+        ESP_LOGE(TAG, "GATT 服务配置失败：rc=%d (0x%x)", rc, rc);
         esp_nimble_hci_deinit();
         update_ble_state(BLE_STATE_ERROR);
         return ESP_FAIL;
     }
+    ESP_LOGD(TAG, "GATT 服务配置成功");
 
+    /* 4. 添加 GATT 服务 */
+    ESP_LOGD(TAG, "Adding GATT services...");
     rc = ble_gatts_add_svcs(nus_gatt_svcs);
     if (rc != 0) {
+        ESP_LOGE(TAG, "GATT 服务添加失败：rc=%d (0x%x)", rc, rc);
         esp_nimble_hci_deinit();
         update_ble_state(BLE_STATE_ERROR);
         return ESP_FAIL;
     }
+    ESP_LOGD(TAG, "GATT 服务添加成功");
 
+    /* 5. 配置 BLE 主机参数 */
+    ESP_LOGD(TAG, "Configuring BLE host parameters...");
     ble_hs_cfg.reset_cb = ble_on_reset;
     ble_hs_cfg.sync_cb = ble_on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
+    /* 6. 生成设备名称 */
     generate_device_name();
+    ESP_LOGI(TAG, "Device name: %s", s_device_name);
     ble_svc_gap_device_name_set(s_device_name);
+    
+    /* 7. 加载绑定信息 */
+    ESP_LOGD(TAG, "Loading binding information...");
     load_binding_info();
+    
+    /* 8. 启动 NimBLE 任务 */
+    ESP_LOGD(TAG, "Starting NimBLE host task...");
     nimble_port_freertos_init(ble_host_task);
+    
+    ESP_LOGI(TAG, "BLE initialization complete");
 
     return ESP_OK;
 }
@@ -698,6 +827,16 @@ void ble_manager_set_time_sync_callback(ble_time_sync_callback_t callback)
 void ble_manager_set_connection_callback(ble_connection_callback_t callback)
 {
     s_connection_callback = callback;
+}
+
+void ble_manager_set_reconnect_callback(void (*cb)(void))
+{
+    s_on_reconnect_cb = cb;
+}
+
+uint32_t ble_manager_get_reconnect_count(void)
+{
+    return s_reconnect_count;
 }
 
 bool ble_manager_is_connected(void)
@@ -797,4 +936,10 @@ static void handle_time_sync_directly(uint32_t timestamp)
     if (ret == ESP_OK) {
         board_notify();
     }
+}
+
+esp_err_t ble_manager_unpair(void)
+{
+    ble_manager_force_reset_bonds();
+    return ESP_OK;
 }

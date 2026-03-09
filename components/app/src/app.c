@@ -15,17 +15,16 @@ static const char* APP_TAG = "app";
 #define BLE_ADV_RETRY_COUNT      3
 #define BLE_ADV_RETRY_DELAY_MS   200
 
-// GUI 任务配置（分离 UI 刷屏至低优先级任务）
-#define GUI_TASK_PRIORITY    (3)
-#define GUI_TASK_PERIOD_MS   (50)
-#define GUI_TASK_STACK_SIZE  (4096)
-
-// 任务句柄（用于后续管理）
-static TaskHandle_t s_gui_task_handle = NULL;
-
 /* BLE 状态缓存（用于日志记录） */
 static bool s_last_connected = false;
 static bool s_last_advertising = false;
+
+/** BLE 重连后恢复回调 */
+static void ble_reconnected(void)
+{
+    ESP_LOGI(APP_TAG, "BLE reconnected, resyncing UI state");
+    /* 通知 UI 层恢复状态 */
+}
 
 /** 蓝牙连接状态变化回调 */
 static void ble_connection_changed(bool connected)
@@ -38,27 +37,6 @@ static void ble_connection_changed(bool connected)
     ui_request_redraw();
 }
 
-/* ===================== GUI 任务 ===================== */
-
-static void ui_redraw_callback(void) {
-    if (s_gui_task_handle != NULL) {
-        xTaskNotifyGive(s_gui_task_handle);
-    }
-}
-
-static void gui_task(void* pvParameters)
-{
-    (void)pvParameters;
-
-    ui_set_redraw_callback(ui_redraw_callback);
-    uint32_t sleep_ms = ui_tick();
-
-    for (;;) {
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(sleep_ms));
-        sleep_ms = ui_tick();
-    }
-}
-
 /* ===================== 应用初始化 ===================== */
 esp_err_t app_init(void)
 {
@@ -67,33 +45,20 @@ esp_err_t app_init(void)
     /* 0. 初始化电源管理模块 */
     board_power_mgmt_init();
 
-    /* 1. 初始化 BLE */
+    /* 1. 初始化 BLE（核心业务） */
     ret = ble_manager_init();
     if (ret != ESP_OK) {
-        ESP_LOGW(APP_TAG, "BLE 初始化失败 %s", esp_err_to_name(ret));
+        ESP_LOGE(APP_TAG, "BLE 初始化失败：%s", esp_err_to_name(ret));
     } else {
+        ESP_LOGI(APP_TAG, "BLE 初始化成功");
         ble_manager_message_queue_init();
         ble_manager_set_message_callback(ui_show_message_with_timestamp);
         ble_manager_set_connection_callback(ble_connection_changed);
+        ble_manager_set_reconnect_callback(ble_reconnected);
     }
 
     /* 2. UI 初始化 */
     ui_init();
-
-    /* 3. 创建 GUI 任务 */
-    BaseType_t gui_ret = xTaskCreatePinnedToCore(
-        gui_task,
-        "gui_task",
-        GUI_TASK_STACK_SIZE,
-        NULL,
-        GUI_TASK_PRIORITY,
-        &s_gui_task_handle,
-        BOARD_APP_CPU
-    );
-
-    if (gui_ret != pdPASS) {
-        return ESP_FAIL;
-    }
 
     return ESP_OK;
 }
@@ -150,11 +115,6 @@ void app_loop(void)
 /* ===================== 应用清理 ===================== */
 void app_cleanup(void)
 {
-    if (s_gui_task_handle != NULL) {
-        vTaskDelete(s_gui_task_handle);
-        s_gui_task_handle = NULL;
-    }
-
     ble_manager_stop_advertising();
     board_vibrate_off();
     board_leds_off();
@@ -164,8 +124,10 @@ void app_cleanup(void)
 esp_err_t app_start_services(void)
 {
     ble_state_t state = ble_manager_get_state();
+    ESP_LOGI(APP_TAG, "BLE state before advertising: %d", state);
+
     if (state == BLE_STATE_UNINITIALIZED || state == BLE_STATE_ERROR) {
-        ESP_LOGW(APP_TAG, "BLE 未就绪 state=%d", state);
+        ESP_LOGE(APP_TAG, "BLE 未就绪 state=%d", state);
         return ESP_FAIL;
     }
 
@@ -173,9 +135,16 @@ esp_err_t app_start_services(void)
     for (int i = 0; i < BLE_ADV_RETRY_COUNT; i++) {
         ret = ble_manager_start_advertising();
         if (ret == ESP_OK) {
+            ESP_LOGI(APP_TAG, "BLE 广播启动成功 (尝试 %d/%d)", i + 1, BLE_ADV_RETRY_COUNT);
             break;
         }
+        ESP_LOGW(APP_TAG, "BLE 广播启动失败 (尝试 %d/%d): %s",
+                 i + 1, BLE_ADV_RETRY_COUNT, esp_err_to_name(ret));
         vTaskDelay(pdMS_TO_TICKS(BLE_ADV_RETRY_DELAY_MS));
+    }
+
+    if (ret != ESP_OK) {
+        ESP_LOGE(APP_TAG, "BLE 广播启动失败，系统无法正常运行");
     }
 
     return ret;

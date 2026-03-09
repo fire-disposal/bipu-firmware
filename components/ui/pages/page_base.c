@@ -1,5 +1,6 @@
 #include "page_base.h"
 #include "ui_task.h"
+#include "ui.h"
 #include "esp_log.h"
 
 static const char* TAG = "page_base";
@@ -33,12 +34,17 @@ void page_navigate_to(ui_page_base_t* from, ui_page_base_t* to, void* params)
     // 2. 保存导航链
     to->prev = from;
     
-    // 3. 调用新页面的 enter（传递参数）
+    // 3. 强制保存 NVS（确保页面切换前数据已持久化）
+    if (ui_has_pending_saves()) {
+        ui_flush_pending_saves_force();
+    }
+    
+    // 4. 调用新页面的 enter（传递参数）
     if (to->on_enter != NULL) {
         to->on_enter(to, params);
     }
     
-    // 4. 请求重绘
+    // 5. 请求重绘
     page_request_render(to);
 }
 
@@ -60,15 +66,20 @@ bool page_go_back(ui_page_base_t* current)
         current->on_exit(current);
     }
     
-    // 2. 调用上一页的 enter
+    // 2. 强制保存 NVS（返回前确保数据已持久化）
+    if (ui_has_pending_saves()) {
+        ui_flush_pending_saves_force();
+    }
+    
+    // 3. 调用上一页的 enter
     if (previous->on_enter != NULL) {
         previous->on_enter(previous, NULL);
     }
     
-    // 3. 清除 prev 链接（已返回）
+    // 4. 清除 prev 链接（已返回）
     current->prev = NULL;
     
-    // 4. 请求重绘
+    // 5. 请求重绘
     page_request_render(previous);
     
     return true;

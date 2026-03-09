@@ -18,7 +18,7 @@ static const char *MAIN_TAG = "MAIN_BOOT";
 #define APP_TASK_NAME        "app_task"
 #define APP_TASK_STACK_SIZE  (4096)
 #define APP_TASK_PRIORITY    (4)
-#define APP_TASK_PERIOD_MS   (10)
+#define APP_TASK_PERIOD_MS   (20)  // 增加到 20ms 减少 CPU 占用和锁竞争
 
 /* ======================== 任务句柄 ======================== */
 static TaskHandle_t s_app_task_handle = NULL;
