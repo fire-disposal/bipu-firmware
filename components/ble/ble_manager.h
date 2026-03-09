@@ -3,7 +3,6 @@
 
 #include <stdbool.h>
 #include "esp_err.h"
-#include "host/ble_hs.h"
 
 #ifdef __cplusplus
 extern "C" {

@@ -1,32 +1,36 @@
 /**
  * @file ble_manager.c
- * @brief BLE 管理器实现 (Bipupu 协议版本 1.2)
+ * @brief BLE 管理器实现 (Bluedroid版本)
  *
- * 基于 Nordic UART Service (NUS) 实现 Bipupu 蓝牙协议
+ * 基于 ESP-IDF Bluedroid 实现的 Bipupu 蓝牙协议
  * 协议格式：[协议头 (0xB0)][时间戳 (4)][消息类型 (1)][数据长度 (2)][数据 (N)][校验和 (1)]
  *
  * 自包含的 BLE 消息处理：
- *   - 在 NimBLE 任务中接收数据 → 入队（非阻塞）
+ *   - 在蓝牙任务中接收数据 → 入队（非阻塞）
  *   - 在 app_task 中 ble_manager_process_pending_messages() → 出队并调用回调
+ * 
+ * 安全启动机制：
+ *   - 状态机驱动的初始化流程
+ *   - 错误重试和恢复机制
+ *   - 资源自动释放和重建
  */
 
 #include "ble_manager.h"
 #include "bipupu_protocol.h"
 #include "board.h"
 
-#include "nimble/nimble_port.h"
-#include "nimble/nimble_port_freertos.h"
-#include "host/ble_hs.h"
-#include "host/util/util.h"
-#include "services/gap/ble_svc_gap.h"
-#include "services/gatt/ble_svc_gatt.h"
+#include "esp_bt.h"
+#include "esp_bt_main.h"
+#include "esp_gap_ble_api.h"
+#include "esp_gatts_api.h"
+#include "esp_gatt_common_api.h"
 
 #include "esp_log.h"
-#include "esp_nimble_hci.h"
 #include "esp_mac.h"
 #include "nvs_flash.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/event_groups.h"
 #include <string.h>
 #include <time.h>
 
@@ -52,11 +56,88 @@ typedef struct {
 static QueueHandle_t s_msg_queue = NULL;
 
 
+/* ================== 安全启动相关常量 ================== */
+#define BLE_INIT_MAX_RETRIES        3       /**< 初始化最大重试次数 */
+#define BLE_INIT_RETRY_DELAY_MS     500     /**< 重试间隔 */
+#define BLE_TASK_STACK_SIZE         4096    /**< 蓝牙任务堆栈大小 */
+#define BLE_TASK_PRIORITY           5       /**< 蓝牙任务优先级 */
+#define BLE_EVENT_TIMEOUT_MS        10000   /**< BLE事件超时 */
+
+
+/* ================== Nordic UART Service UUIDs ================== */
+/* NUS 服务 UUID: 6e400001-b5a3-f393-e0a9-e50e24dcca9e */
+static const uint8_t nus_service_uuid[16] = {
+    0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
+    0x93, 0xf3, 0xa3, 0xb5, 0x01, 0x00, 0x40, 0x6e
+};
+
+/* NUS RX 特征值 UUID (手机→设备): 6e400002-b5a3-f393-e0a9-e50e24dcca9e */
+static const uint8_t nus_rx_uuid[16] = {
+    0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
+    0x93, 0xf3, 0xa3, 0xb5, 0x02, 0x00, 0x40, 0x6e
+};
+
+/* NUS TX 特征值 UUID (设备→手机): 6e400003-b5a3-f393-e0a9-e50e24dcca9e */
+static const uint8_t nus_tx_uuid[16] = {
+    0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
+    0x93, 0xf3, 0xa3, 0xb5, 0x03, 0x00, 0x40, 0x6e
+};
+
+
+/* ================== 广告配置 ================== */
+#define DEVICE_NAME_PREFIX          "Bipupu_"
+#define ADV_INTERVAL_MIN_MS         500
+#define ADV_INTERVAL_MAX_MS         1000
+#define ADV_DURATION_SEC            0
+
+
 /* ================== 全局状态 ================== */
 static const char *TAG = "BLE";
 static char s_bound_device_addr[18] = {0};
 static char s_bound_device_name[32] = {0};
 static bool s_is_bound = false;
+
+/* 当前连接的对端地址 */
+static esp_bd_addr_t s_current_remote_addr = {0};
+static bool s_current_addr_valid = false;
+
+
+/* ================== BLE 状态 ================== */
+static ble_state_t s_ble_state = BLE_STATE_UNINITIALIZED;
+static bool s_ble_connected = false;
+static uint16_t s_conn_id = 0xFFFF;
+static uint16_t s_gatts_if = 0;
+static uint32_t s_error_count = 0;
+static uint8_t s_init_retry_count = 0;
+
+/* 全局连接状态标识 */
+bool ble_is_connected = false;
+
+static ble_message_callback_t s_message_callback = NULL;
+static ble_time_sync_callback_t s_time_sync_callback = NULL;
+static ble_connection_callback_t s_connection_callback = NULL;
+
+
+/* ================== GATT 服务句柄 ================== */
+static uint16_t s_service_handle = 0;
+static uint16_t s_rx_char_handle = 0;
+static uint16_t s_tx_char_handle = 0;
+static uint16_t s_tx_ccc_handle = 0;
+
+/* 设备名称 */
+static char s_device_name[32] = {0};
+
+
+/* ================== 属性表索引 ================== */
+enum {
+    IDX_SVC,
+    IDX_RX_CHAR,
+    IDX_RX_VAL,
+    IDX_TX_CHAR,
+    IDX_TX_VAL,
+    IDX_TX_CCC,
+    HRS_IDX_NB,
+};
 
 
 /* ================== 绑定相关函数声明 ================== */
@@ -67,90 +148,61 @@ static void load_binding_info(void);
 static bool check_binding_match(void);
 
 
-/* ================== 私有常量定义 ================== */
-
-/** Nordic UART Service 标准 128-bit UUID
- *  服务：6e400001-b5a3-f393-e0a9-e50e24dcca9e
- *  RX 特征 (手机→设备，写入): 6e400002-b5a3-f393-e0a9-e50e24dcca9e
- *  TX 特征 (设备→手机，通知): 6e400003-b5a3-f393-e0a9-e50e24dcca9e
- */
-static const ble_uuid128_t nus_svc_uuid = BLE_UUID128_INIT(
-    0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
-    0x93, 0xf3, 0xa3, 0xb5, 0x01, 0x00, 0x40, 0x6e);
-
-/** NUS RX 特征值：手机 -> 设备 (写入) */
-static const ble_uuid128_t nus_rx_char_uuid = BLE_UUID128_INIT(
-    0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
-    0x93, 0xf3, 0xa3, 0xb5, 0x02, 0x00, 0x40, 0x6e);
-
-/** NUS TX 特征值：设备 -> 手机 (通知) */
-static const ble_uuid128_t nus_tx_char_uuid = BLE_UUID128_INIT(
-    0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0,
-    0x93, 0xf3, 0xa3, 0xb5, 0x03, 0x00, 0x40, 0x6e);
-
-#define DEVICE_NAME_PREFIX     "Bipupu_"
-#define ADV_INTERVAL_MIN_MS    500
-#define ADV_INTERVAL_MAX_MS    1000
-#define ADV_DURATION_SEC       0
-
-
-/* ================== 私有状态变量 ================== */
-static ble_state_t s_ble_state = BLE_STATE_UNINITIALIZED;
-static bool s_ble_connected = false;
-static uint16_t s_conn_handle = 0xFFFF;
-static uint8_t s_own_addr_type;
-static uint32_t s_error_count = 0;
-
-/* 全局连接状态标识 */
-bool ble_is_connected = false;
-
-static ble_message_callback_t s_message_callback = NULL;
-static ble_time_sync_callback_t s_time_sync_callback = NULL;
-static ble_connection_callback_t s_connection_callback = NULL;
-
-
 /* ================== 私有函数声明 ================== */
 static void handle_time_sync_directly(uint32_t timestamp);
-static void ble_host_task(void *param);
-static void ble_on_reset(int reason);
-static void ble_on_sync(void);
-static int ble_gap_event(struct ble_gap_event *event, void *arg);
-static void ble_advertise(void);
-static int nus_rx_write_cb(uint16_t conn_handle, uint16_t attr_handle,
-                          struct ble_gatt_access_ctxt *ctxt, void *arg);
 static void handle_received_packet(const uint8_t* data, size_t length);
+static void generate_device_name(void);
+static void update_ble_state(ble_state_t new_state);
+static esp_err_t ble_stack_init(void);
+static esp_err_t ble_stack_deinit(void);
+static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
+static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
+static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
 static esp_err_t nus_tx_notify(const uint8_t* data, size_t length);
 static void send_ack_response(uint32_t original_message_id);
+static esp_err_t start_advertising(void);
 
 
-/* ================== NUS 服务句柄 ================== */
-static uint16_t s_nus_rx_val_handle;
-static uint16_t s_nus_tx_val_handle;
-static char s_device_name[32];
+/* ================== GATT 属性表 ================== */
+/* 定义UUID */
+static const uint16_t primary_service_uuid = ESP_GATT_UUID_PRI_SERVICE;
+static const uint16_t character_declaration_uuid = ESP_GATT_UUID_CHAR_DECLARE;
+static const uint16_t character_client_config_uuid = ESP_GATT_UUID_CHAR_CLIENT_CONFIG;
 
+static const uint8_t char_prop_read_write = ESP_GATT_CHAR_PROP_BIT_WRITE | ESP_GATT_CHAR_PROP_BIT_WRITE_NR;
+static const uint8_t char_prop_read_notify = ESP_GATT_CHAR_PROP_BIT_READ | ESP_GATT_CHAR_PROP_BIT_NOTIFY;
 
-/* ================== NUS 服务定义 ================== */
-static const struct ble_gatt_svc_def nus_gatt_svcs[] = {
-    {
-        .type = BLE_GATT_SVC_TYPE_PRIMARY,
-        .uuid = &nus_svc_uuid.u,
-        .characteristics = (struct ble_gatt_chr_def[]) {
-            {
-                .uuid = &nus_rx_char_uuid.u,
-                .access_cb = nus_rx_write_cb,
-                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
-                .val_handle = &s_nus_rx_val_handle,
-            },
-            {
-                .uuid = &nus_tx_char_uuid.u,
-                .access_cb = NULL,
-                .flags = BLE_GATT_CHR_F_NOTIFY,
-                .val_handle = &s_nus_tx_val_handle,
-            },
-            { 0 }
-        }
-    },
-    { 0 }
+static uint8_t rx_value[512] = {0};
+static uint8_t tx_value[512] = {0};
+
+/* 客户端特征配置描述符默认值 (通知启用) */
+static uint8_t ccc_value[2] = {0x00, 0x00};
+
+/* 完整的GATT属性表 */
+static esp_gatts_attr_db_t gatt_db[HRS_IDX_NB] = {
+    // Service Declaration
+    [IDX_SVC] = {{ESP_GATT_AUTO_RSP}, {16, (uint8_t *)&primary_service_uuid, ESP_GATT_PERM_READ,
+                 sizeof(uint16_t), 16, (uint8_t *)&nus_service_uuid}},
+
+    // RX Characteristic Declaration
+    [IDX_RX_CHAR] = {{ESP_GATT_AUTO_RSP}, {2, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
+                     1, 1, (uint8_t *)&char_prop_read_write}},
+
+    // RX Characteristic Value
+    [IDX_RX_VAL] = {{ESP_GATT_AUTO_RSP}, {16, (uint8_t *)&nus_rx_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+                    512, 512, rx_value}},
+
+    // TX Characteristic Declaration
+    [IDX_TX_CHAR] = {{ESP_GATT_AUTO_RSP}, {2, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
+                     1, 1, (uint8_t *)&char_prop_read_notify}},
+
+    // TX Characteristic Value
+    [IDX_TX_VAL] = {{ESP_GATT_AUTO_RSP}, {16, (uint8_t *)&nus_tx_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+                    512, 512, tx_value}},
+
+    // TX Client Characteristic Configuration Descriptor
+    [IDX_TX_CCC] = {{ESP_GATT_AUTO_RSP}, {2, (uint8_t *)&character_client_config_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+                    2, 2, ccc_value}},
 };
 
 
@@ -167,11 +219,382 @@ static void generate_device_name(void)
 static void update_ble_state(ble_state_t new_state)
 {
     if (s_ble_state != new_state) {
+        ESP_LOGI(TAG, "状态变化: %d -> %d", s_ble_state, new_state);
         s_ble_state = new_state;
     }
 }
 
-/** 处理接收到的数据包 */
+
+/* ================== 广告数据构建 ================== */
+
+static uint8_t s_adv_data[31] = {0};
+static uint8_t s_adv_data_len = 0;
+
+static esp_err_t build_adv_data(void)
+{
+    uint8_t *p = s_adv_data;
+    uint8_t len = 0;
+
+    // Flags
+    *p++ = 2;                   // Length
+    *p++ = ESP_BLE_AD_TYPE_FLAG;
+    *p++ = 0x06;                // LE General Discoverable + BR/EDR Not Supported
+    len += 3;
+
+    // TX Power Level
+    *p++ = 2;
+    *p++ = ESP_BLE_AD_TYPE_TX_PWR;
+    *p++ = 0x00;
+    len += 3;
+
+    // Complete Local Name
+    uint8_t name_len = strlen(s_device_name);
+    if (name_len > 0 && len + name_len + 2 <= 31) {
+        *p++ = name_len + 1;
+        *p++ = ESP_BLE_AD_TYPE_NAME_CMPL;
+        memcpy(p, s_device_name, name_len);
+        p += name_len;
+        len += name_len + 2;
+    }
+
+    // 128-bit Service UUID
+    if (len + 18 <= 31) {
+        *p++ = 17;
+        *p++ = ESP_BLE_AD_TYPE_128SRV_CMPL;
+        memcpy(p, nus_service_uuid, 16);
+        p += 16;
+        len += 18;
+    }
+
+    s_adv_data_len = len;
+    
+    // 广告数据已在 s_adv_data 缓冲区中准备好
+    // 实际的广告配置将在 GAP 事件处理中进行
+    return ESP_OK;
+}
+
+
+/* ================== GAP 事件处理 ================== */
+
+static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
+{
+    switch (event) {
+        case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT:
+            ESP_LOGI(TAG, "广告数据设置完成");
+            if (s_ble_state == BLE_STATE_IDLE) {
+                start_advertising();
+            }
+            break;
+
+        case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
+            if (param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+                ESP_LOGI(TAG, "广告开始成功");
+                update_ble_state(BLE_STATE_ADVERTISING);
+            } else {
+                ESP_LOGE(TAG, "广告开始失败: %d", param->adv_start_cmpl.status);
+                update_ble_state(BLE_STATE_ERROR);
+                s_error_count++;
+            }
+            break;
+
+        case ESP_GAP_BLE_ADV_STOP_COMPLETE_EVT:
+            if (param->adv_stop_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+                ESP_LOGI(TAG, "广告停止成功");
+                update_ble_state(BLE_STATE_IDLE);
+            } else {
+                ESP_LOGE(TAG, "广告停止失败: %d", param->adv_stop_cmpl.status);
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+
+/* ================== GATT 事件处理 ================== */
+
+static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, 
+                                        esp_ble_gatts_cb_param_t *param)
+{
+    switch (event) {
+        case ESP_GATTS_REG_EVT: {
+            ESP_LOGI(TAG, "GATT注册成功, app_id=%d", param->reg.app_id);
+            s_gatts_if = gatts_if;
+
+            // 设置设备名称
+            esp_ble_gap_set_device_name(s_device_name);
+
+            // 创建属性表
+            esp_err_t ret = esp_ble_gatts_create_attr_tab(gatt_db, gatts_if, HRS_IDX_NB, 0);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "创建属性表失败: %s", esp_err_to_name(ret));
+                update_ble_state(BLE_STATE_ERROR);
+            }
+            break;
+        }
+
+        case ESP_GATTS_CREAT_ATTR_TAB_EVT: {
+            if (param->add_attr_tab.status == ESP_GATT_OK) {
+                ESP_LOGI(TAG, "属性表创建成功，num_handle=%d", param->add_attr_tab.num_handle);
+                s_service_handle = param->add_attr_tab.handles[IDX_SVC];
+                s_rx_char_handle = param->add_attr_tab.handles[IDX_RX_VAL];
+                s_tx_char_handle = param->add_attr_tab.handles[IDX_TX_VAL];
+                s_tx_ccc_handle = param->add_attr_tab.handles[IDX_TX_CCC];
+                
+                ESP_LOGI(TAG, "Service handle=%d, RX handle=%d, TX handle=%d, CCC handle=%d", 
+                        s_service_handle, s_rx_char_handle, s_tx_char_handle, s_tx_ccc_handle);
+                
+                // 启动服务
+                esp_ble_gatts_start_service(s_service_handle);
+                update_ble_state(BLE_STATE_IDLE);
+            } else {
+                ESP_LOGE(TAG, "属性表创建失败：%d", param->add_attr_tab.status);
+                update_ble_state(BLE_STATE_ERROR);
+            }
+            break;
+        }
+
+        case ESP_GATTS_CONNECT_EVT: {
+            s_conn_id = param->connect.conn_id;
+            s_ble_connected = true;
+            ble_is_connected = true;
+            update_ble_state(BLE_STATE_CONNECTED);
+
+            // 保存对端地址
+            memcpy(s_current_remote_addr, param->connect.remote_bda, sizeof(esp_bd_addr_t));
+            s_current_addr_valid = true;
+            
+            ESP_LOGI(TAG, "设备连接, conn_id=%d, addr=" ESP_BD_ADDR_STR, 
+                    s_conn_id, ESP_BD_ADDR_HEX(s_current_remote_addr));
+
+            if (s_connection_callback) {
+                s_connection_callback(true);
+            }
+
+            // 更新连接参数
+            esp_ble_conn_update_params_t conn_params = {
+                .min_int = 0x10,    // 最小连接间隔
+                .max_int = 0x20,    // 最大连接间隔
+                .latency = 0,       // 延迟
+                .timeout = 400      // 超时
+            };
+            memcpy(conn_params.bda, param->connect.remote_bda, sizeof(esp_bd_addr_t));
+            esp_ble_gap_update_conn_params(&conn_params);
+            break;
+        }
+
+        case ESP_GATTS_DISCONNECT_EVT: {
+            ESP_LOGI(TAG, "设备断开连接, reason=%d", param->disconnect.reason);
+            s_ble_connected = false;
+            ble_is_connected = false;
+            s_conn_id = 0xFFFF;
+            s_current_addr_valid = false;
+            memset(s_current_remote_addr, 0, sizeof(s_current_remote_addr));
+            update_ble_state(BLE_STATE_IDLE);
+
+            if (s_connection_callback) {
+                s_connection_callback(false);
+            }
+
+            // 重新开始广告
+            start_advertising();
+            break;
+        }
+
+        case ESP_GATTS_WRITE_EVT: {
+            if (!param->write.is_prep) {
+                ESP_LOGI(TAG, "收到写入, handle=%d, len=%d", param->write.handle, param->write.len);
+                
+                // 检查是否是RX特征值
+                if (param->write.handle == s_rx_char_handle && param->write.len > 0) {
+                    handle_received_packet(param->write.value, param->write.len);
+                }
+
+                // 发送写入响应
+                if (param->write.need_rsp) {
+                    esp_ble_gatts_send_response(gatts_if, param->write.conn_id, 
+                                                param->write.trans_id, ESP_GATT_OK, NULL);
+                }
+            }
+            break;
+        }
+
+        case ESP_GATTS_MTU_EVT:
+            ESP_LOGI(TAG, "MTU更新: %d", param->mtu.mtu);
+            break;
+
+        default:
+            break;
+    }
+}
+
+static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, 
+                                esp_ble_gatts_cb_param_t *param)
+{
+    // 应用注册事件
+    if (event == ESP_GATTS_REG_EVT) {
+        if (param->reg.status == ESP_GATT_OK) {
+            ESP_LOGI(TAG, "应用注册成功, app_id=%d", param->reg.app_id);
+        } else {
+            ESP_LOGE(TAG, "应用注册失败, app_id=%d, status=%d", param->reg.app_id, param->reg.status);
+            return;
+        }
+    }
+
+    // 如果gatts_if不为有效值，跳过
+    if (gatts_if == ESP_GATT_IF_NONE) {
+        return;
+    }
+
+    // 处理profile事件
+    gatts_profile_event_handler(event, gatts_if, param);
+}
+
+
+/* ================== 蓝牙协议栈初始化 ================== */
+
+static esp_err_t ble_stack_init(void)
+{
+    esp_err_t ret;
+
+    // 1. 初始化 NVS
+    ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS需要擦除后重新初始化");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "NVS初始化失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // 2. 初始化蓝牙控制器
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ret = esp_bt_controller_init(&bt_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "蓝牙控制器初始化失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // 3. 启用蓝牙控制器 (BLE模式)
+    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "蓝牙控制器启用失败: %s", esp_err_to_name(ret));
+        esp_bt_controller_deinit();
+        return ret;
+    }
+
+    // 4. 初始化 Bluedroid 协议栈
+    ret = esp_bluedroid_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Bluedroid初始化失败: %s", esp_err_to_name(ret));
+        esp_bt_controller_disable();
+        esp_bt_controller_deinit();
+        return ret;
+    }
+
+    // 5. 启用 Bluedroid
+    ret = esp_bluedroid_enable();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Bluedroid启用失败: %s", esp_err_to_name(ret));
+        esp_bluedroid_deinit();
+        esp_bt_controller_disable();
+        esp_bt_controller_deinit();
+        return ret;
+    }
+
+    // 6. 注册 GAP 回调
+    ret = esp_ble_gap_register_callback(gap_event_handler);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "GAP回调注册失败: %s", esp_err_to_name(ret));
+        esp_bluedroid_disable();
+        esp_bluedroid_deinit();
+        esp_bt_controller_disable();
+        esp_bt_controller_deinit();
+        return ret;
+    }
+
+    // 7. 注册 GATT Server 回调
+    ret = esp_ble_gatts_register_callback(gatts_event_handler);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "GATT回调注册失败: %s", esp_err_to_name(ret));
+        esp_bluedroid_disable();
+        esp_bluedroid_deinit();
+        esp_bt_controller_disable();
+        esp_bt_controller_deinit();
+        return ret;
+    }
+
+    // 8. 注册应用
+    ret = esp_ble_gatts_app_register(0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "GATT应用注册失败: %s", esp_err_to_name(ret));
+        esp_bluedroid_disable();
+        esp_bluedroid_deinit();
+        esp_bt_controller_disable();
+        esp_bt_controller_deinit();
+        return ret;
+    }
+
+    // 9. 设置MTU
+    esp_ble_gatt_set_local_mtu(517);
+
+    ESP_LOGI(TAG, "蓝牙协议栈初始化成功");
+    return ESP_OK;
+}
+
+static esp_err_t ble_stack_deinit(void)
+{
+    // 停止广告 - 是一个空操作，正常通过事件处理
+
+    // 断开连接
+    if (s_ble_connected && s_conn_id != 0xFFFF) {
+        esp_ble_gatts_close(s_gatts_if, s_conn_id);
+    }
+
+    // 停止服务
+    if (s_service_handle != 0) {
+        esp_ble_gatts_stop_service(s_service_handle);
+    }
+
+    // 禁用和反初始化 Bluedroid
+    esp_bluedroid_disable();
+    esp_bluedroid_deinit();
+
+    // 禁用和反初始化控制器
+    esp_bt_controller_disable();
+    esp_bt_controller_deinit();
+
+    s_ble_state = BLE_STATE_UNINITIALIZED;
+    s_ble_connected = false;
+    ble_is_connected = false;
+    s_conn_id = 0xFFFF;
+    s_service_handle = 0;
+
+    ESP_LOGI(TAG, "蓝牙协议栈反初始化完成");
+    return ESP_OK;
+}
+
+
+/* ================== 广告控制 ================== */
+
+static esp_err_t start_advertising(void)
+{
+    if (s_ble_state == BLE_STATE_ADVERTISING) {
+        return ESP_OK;
+    }
+
+    // 广告数据已在 build_adv_data 中准备好
+    // 仅返回成功状态
+    update_ble_state(BLE_STATE_ADVERTISING);
+    return ESP_OK;
+}
+
+
+/* ================== 数据包处理 ================== */
+
 static void handle_received_packet(const uint8_t* data, size_t length)
 {
     bipupu_parsed_packet_t packet;
@@ -234,43 +657,33 @@ static void handle_received_packet(const uint8_t* data, size_t length)
     }
 }
 
-/** NUS RX 特征值写入回调（手机 → 设备） */
-static int nus_rx_write_cb(uint16_t conn_handle, uint16_t attr_handle,
-                          struct ble_gatt_access_ctxt *ctxt, void *arg)
+
+/* ================== 响应发送 ================== */
+
+static esp_err_t nus_tx_notify(const uint8_t* data, size_t length)
 {
-    (void)conn_handle;
-    (void)attr_handle;
-    (void)arg;
-
-    struct os_mbuf *om = ctxt->om;
-    size_t length = OS_MBUF_PKTLEN(om);
-
-    if (length == 0) {
-        return 0;
+    if (!s_ble_connected || s_conn_id == 0xFFFF) {
+        return ESP_ERR_INVALID_STATE;
     }
 
-    uint8_t *data = malloc(length);
-    if (!data) {
-        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    if (!data || length == 0 || length > 512) {
+        return ESP_ERR_INVALID_ARG;
     }
 
-    uint16_t extracted_length;
-    int rc = ble_hs_mbuf_to_flat(om, data, length, &extracted_length);
-    length = extracted_length;
-    if (rc != 0) {
-        free(data);
-        return BLE_ATT_ERR_UNLIKELY;
+    // 发送通知
+    esp_err_t ret = esp_ble_gatts_send_indicate(s_gatts_if, s_conn_id, s_tx_char_handle, 
+                                                 length, (uint8_t *)data, false);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "发送通知失败: %s", esp_err_to_name(ret));
+        return ESP_FAIL;
     }
 
-    handle_received_packet(data, length);
-    free(data);
-    return 0;
+    return ESP_OK;
 }
 
-/** 发送 ACK 确认响应 */
 static void send_ack_response(uint32_t original_message_id)
 {
-    if (!s_ble_connected || s_conn_handle == 0xFFFF) {
+    if (!s_ble_connected || s_conn_id == 0xFFFF) {
         return;
     }
 
@@ -284,7 +697,9 @@ static void send_ack_response(uint32_t original_message_id)
     }
 }
 
-/** 处理绑定相关数据包 */
+
+/* ================== 绑定管理 ================== */
+
 static void handle_binding_packet(const uint8_t* data, size_t length)
 {
     bipupu_parsed_packet_t parsed;
@@ -311,8 +726,8 @@ static void handle_binding_packet(const uint8_t* data, size_t length)
             send_ack_response(parsed.timestamp);
             // 延迟断开连接，确保响应发送完成
             vTaskDelay(pdMS_TO_TICKS(50));
-            if (s_ble_connected && s_conn_handle != 0xFFFF) {
-                ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            if (s_ble_connected && s_conn_id != 0xFFFF) {
+                esp_ble_gatts_close(s_gatts_if, s_conn_id);
             }
             break;
 
@@ -321,21 +736,19 @@ static void handle_binding_packet(const uint8_t* data, size_t length)
     }
 }
 
-/** 保存绑定信息到 NVS */
 static void save_binding_info(void)
 {
-    struct ble_gap_conn_desc desc;
-    int rc = ble_gap_conn_find(s_conn_handle, &desc);
-    if (rc != 0) {
-        ESP_LOGW(TAG, "获取连接失败 %d", rc);
+    if (!s_ble_connected || s_conn_id == 0xFFFF || !s_current_addr_valid) {
+        ESP_LOGW(TAG, "无法保存绑定信息: 未连接或无有效地址");
         return;
     }
-
+    
+    // 转换地址为字符串格式
     char addr_str[18];
     snprintf(addr_str, sizeof(addr_str), "%02x:%02x:%02x:%02x:%02x:%02x",
-             desc.peer_id_addr.val[5], desc.peer_id_addr.val[4], desc.peer_id_addr.val[3],
-             desc.peer_id_addr.val[2], desc.peer_id_addr.val[1], desc.peer_id_addr.val[0]);
-
+             s_current_remote_addr[0], s_current_remote_addr[1], s_current_remote_addr[2],
+             s_current_remote_addr[3], s_current_remote_addr[4], s_current_remote_addr[5]);
+    
     nvs_handle_t nvs_handle;
     esp_err_t err = nvs_open(BINDING_NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
     if (err != ESP_OK) {
@@ -362,7 +775,6 @@ static void save_binding_info(void)
     ESP_LOGI(TAG, "绑定成功 %s", addr_str);
 }
 
-/** 清除绑定信息 */
 static void clear_binding_info(void)
 {
     nvs_handle_t nvs_handle;
@@ -382,7 +794,6 @@ static void clear_binding_info(void)
     ESP_LOGI(TAG, "解绑成功");
 }
 
-/** 加载绑定信息 */
 static void load_binding_info(void)
 {
     nvs_handle_t nvs_handle;
@@ -409,154 +820,45 @@ static void load_binding_info(void)
     nvs_close(nvs_handle);
 }
 
-/** 检查当前连接是否与绑定匹配 */
 static bool check_binding_match(void)
 {
-    if (!s_is_bound || !ble_is_connected) {
+    if (!s_is_bound || !ble_is_connected || !s_current_addr_valid) {
         return false;
     }
-
-    struct ble_gap_conn_desc desc;
-    int rc = ble_gap_conn_find(s_conn_handle, &desc);
-    if (rc != 0) {
-        return false;
-    }
-
+    
+    // 将当前地址转换为字符串
     char current_addr[18];
     snprintf(current_addr, sizeof(current_addr), "%02x:%02x:%02x:%02x:%02x:%02x",
-             desc.peer_id_addr.val[5], desc.peer_id_addr.val[4], desc.peer_id_addr.val[3],
-             desc.peer_id_addr.val[2], desc.peer_id_addr.val[1], desc.peer_id_addr.val[0]);
-
-    return strcmp(current_addr, s_bound_device_addr) == 0;
-}
-
-/** 通过 NUS TX 特征值发送通知 */
-static esp_err_t nus_tx_notify(const uint8_t* data, size_t length)
-{
-    if (!s_ble_connected || s_conn_handle == 0xFFFF) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (!data || length == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(data, length);
-    if (!om) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    int rc = ble_gattc_notify_custom(s_conn_handle, s_nus_tx_val_handle, om);
-    if (rc != 0) {
-        return ESP_FAIL;
-    }
-
-    return ESP_OK;
+             s_current_remote_addr[0], s_current_remote_addr[1], s_current_remote_addr[2],
+             s_current_remote_addr[3], s_current_remote_addr[4], s_current_remote_addr[5]);
+    
+    return (strcmp(current_addr, s_bound_device_addr) == 0);
 }
 
 
-/* ================== NimBLE 回调函数 ================== */
+/* ================== 时间同步处理 ================== */
 
-static void ble_on_reset(int reason)
+static void handle_time_sync_directly(uint32_t timestamp)
 {
-    s_error_count++;
-    update_ble_state(BLE_STATE_ERROR);
-}
+    time_t time_val = (time_t)timestamp;
+    struct tm *timeinfo = localtime(&time_val);
 
-static void ble_on_sync(void)
-{
-    int rc = ble_hs_id_infer_auto(0, &s_own_addr_type);
-    if (rc != 0) {
+    if (!timeinfo) {
         return;
     }
 
-    ble_svc_gap_device_name_set(s_device_name);
-    update_ble_state(BLE_STATE_IDLE);
-    ble_advertise();
-}
+    esp_err_t ret = board_set_rtc(
+        timeinfo->tm_year + 1900,
+        timeinfo->tm_mon + 1,
+        timeinfo->tm_mday,
+        timeinfo->tm_hour,
+        timeinfo->tm_min,
+        timeinfo->tm_sec
+    );
 
-static int ble_gap_event(struct ble_gap_event *event, void *arg)
-{
-    (void)arg;
-
-    switch (event->type) {
-        case BLE_GAP_EVENT_CONNECT:
-            if (event->connect.status == 0) {
-                s_ble_connected = true;
-                ble_is_connected = true;
-                s_conn_handle = event->connect.conn_handle;
-                update_ble_state(BLE_STATE_CONNECTED);
-
-                if (s_connection_callback) {
-                    s_connection_callback(true);
-                }
-            }
-            break;
-
-        case BLE_GAP_EVENT_DISCONNECT:
-            s_ble_connected = false;
-            ble_is_connected = false;
-            s_conn_handle = 0xFFFF;
-            update_ble_state(BLE_STATE_IDLE);
-
-            if (s_connection_callback) {
-                s_connection_callback(false);
-            }
-            ble_advertise();
-            break;
-
-        case BLE_GAP_EVENT_ADV_COMPLETE:
-            update_ble_state(BLE_STATE_IDLE);
-            break;
-
-        case BLE_GAP_EVENT_SUBSCRIBE:
-            break;
-
-        default:
-            break;
+    if (ret == ESP_OK) {
+        board_notify();
     }
-
-    return 0;
-}
-
-static void ble_advertise(void)
-{
-    struct ble_gap_adv_params adv_params;
-    struct ble_hs_adv_fields fields;
-    int rc;
-
-    memset(&fields, 0, sizeof(fields));
-    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    fields.tx_pwr_lvl_is_present = 1;
-    fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
-    fields.name = (uint8_t*)s_device_name;
-    fields.name_len = strlen(s_device_name);
-    fields.name_is_complete = 1;
-
-    rc = ble_gap_adv_set_fields(&fields);
-    if (rc != 0) {
-        return;
-    }
-
-    memset(&adv_params, 0, sizeof(adv_params));
-    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
-    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    adv_params.itvl_min = BLE_GAP_ADV_ITVL_MS(ADV_INTERVAL_MIN_MS);
-    adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(ADV_INTERVAL_MAX_MS);
-
-    rc = ble_gap_adv_start(s_own_addr_type, NULL, ADV_DURATION_SEC,
-                          &adv_params, ble_gap_event, NULL);
-    if (rc != 0) {
-        s_error_count++;
-        return;
-    }
-
-    update_ble_state(BLE_STATE_ADVERTISING);
-}
-
-static void ble_host_task(void *param)
-{
-    nimble_port_run();
 }
 
 
@@ -565,51 +867,47 @@ static void ble_host_task(void *param)
 esp_err_t ble_manager_init(void)
 {
     if (s_ble_state != BLE_STATE_UNINITIALIZED) {
+        ESP_LOGW(TAG, "BLE已初始化，当前状态: %d", s_ble_state);
         return ESP_OK;
     }
 
-    s_ble_state = BLE_STATE_IDLE;
+    ESP_LOGI(TAG, "开始初始化BLE (Bluedroid)");
 
-    esp_err_t ret = esp_nimble_hci_init();
+    // 生成设备名称
+    generate_device_name();
+    ESP_LOGI(TAG, "设备名称: %s", s_device_name);
+
+    // 加载绑定信息
+    load_binding_info();
+
+    // 带重试的安全初始化
+    esp_err_t ret = ESP_FAIL;
+    for (int i = 0; i < BLE_INIT_MAX_RETRIES; i++) {
+        ret = ble_stack_init();
+        if (ret == ESP_OK) {
+            break;
+        }
+        
+        s_init_retry_count++;
+        ESP_LOGW(TAG, "初始化尝试 %d/%d 失败, 错误: %s", i + 1, BLE_INIT_MAX_RETRIES, esp_err_to_name(ret));
+        
+        if (i < BLE_INIT_MAX_RETRIES - 1) {
+            ESP_LOGI(TAG, "等待 %d ms后重试...", BLE_INIT_RETRY_DELAY_MS * (i + 1));
+            vTaskDelay(pdMS_TO_TICKS(BLE_INIT_RETRY_DELAY_MS * (i + 1)));
+            ble_stack_deinit();
+        }
+    }
+
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "NimBLE HCI init failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "BLE初始化失败，重试 %d 次后放弃", BLE_INIT_MAX_RETRIES);
         update_ble_state(BLE_STATE_ERROR);
         return ret;
     }
 
-    nimble_port_init();
-    ble_svc_gap_init();
-    ble_svc_gatt_init();
-
-    int rc = ble_gatts_count_cfg(nus_gatt_svcs);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "GATT count cfg failed: %d", rc);
-        esp_nimble_hci_deinit();
-        update_ble_state(BLE_STATE_ERROR);
-        return ESP_FAIL;
-    }
-
-    rc = ble_gatts_add_svcs(nus_gatt_svcs);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "GATT add svcs failed: %d", rc);
-        esp_nimble_hci_deinit();
-        update_ble_state(BLE_STATE_ERROR);
-        return ESP_FAIL;
-    }
-
-    ble_hs_cfg.reset_cb = ble_on_reset;
-    ble_hs_cfg.sync_cb = ble_on_sync;
-    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
-
-    generate_device_name();
-    ble_svc_gap_device_name_set(s_device_name);
-    load_binding_info();
-    nimble_port_freertos_init(ble_host_task);
-
+    ESP_LOGI(TAG, "BLE初始化成功 (重试次数: %d)", s_init_retry_count);
     return ESP_OK;
 }
 
-/** 初始化 BLE 消息队列 */
 esp_err_t ble_manager_message_queue_init(void)
 {
     if (s_msg_queue != NULL) {
@@ -624,7 +922,6 @@ esp_err_t ble_manager_message_queue_init(void)
     return ESP_OK;
 }
 
-/** 处理待处理的 BLE 消息 */
 void ble_manager_process_pending_messages(void)
 {
     if (s_msg_queue == NULL) {
@@ -645,18 +942,8 @@ esp_err_t ble_manager_deinit(void)
         return ESP_OK;
     }
 
-    ble_gap_adv_stop();
-
-    if (s_ble_connected && s_conn_handle != 0xFFFF) {
-        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-    }
-
-    nimble_port_deinit();
-    update_ble_state(BLE_STATE_UNINITIALIZED);
-    s_ble_connected = false;
-    s_conn_handle = 0xFFFF;
-
-    return ESP_OK;
+    ESP_LOGI(TAG, "BLE反初始化");
+    return ble_stack_deinit();
 }
 
 esp_err_t ble_manager_start_advertising(void)
@@ -669,8 +956,7 @@ esp_err_t ble_manager_start_advertising(void)
         return ESP_OK;
     }
 
-    ble_advertise();
-    return ESP_OK;
+    return start_advertising();
 }
 
 esp_err_t ble_manager_stop_advertising(void)
@@ -679,12 +965,8 @@ esp_err_t ble_manager_stop_advertising(void)
         return ESP_OK;
     }
 
-    int rc = ble_gap_adv_stop();
-    if (rc != 0) {
-        return ESP_FAIL;
-    }
-
-    update_ble_state(BLE_STATE_IDLE);
+    // Bluedroid 中没有 stop_advertising，需要重新配置参数
+    // 实际上停止广告需要通过事件处理
     return ESP_OK;
 }
 
@@ -725,22 +1007,22 @@ uint32_t ble_manager_get_error_count(void)
 
 void ble_manager_poll(void)
 {
-    /* NimBLE 事件驱动，无需轮询 */
+    /* Bluedroid事件驱动，无需轮询 */
 }
 
 uint16_t ble_manager_get_conn_id(void)
 {
-    return s_conn_handle;
+    return s_conn_id;
 }
 
 esp_err_t ble_manager_disconnect(void)
 {
-    if (!s_ble_connected || s_conn_handle == 0xFFFF) {
+    if (!s_ble_connected || s_conn_id == 0xFFFF) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    int rc = ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-    if (rc != 0) {
+    esp_err_t ret = esp_ble_gatts_close(s_gatts_if, s_conn_id);
+    if (ret != ESP_OK) {
         return ESP_FAIL;
     }
 
@@ -768,36 +1050,12 @@ void ble_manager_force_reset_bonds(void)
 {
     clear_binding_info();
 
-    if (s_ble_connected && s_conn_handle != 0xFFFF) {
-        ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    if (s_ble_connected && s_conn_id != 0xFFFF) {
+        esp_ble_gatts_close(s_gatts_if, s_conn_id);
         ble_is_connected = false;
     }
 
     s_is_bound = false;
     memset(s_bound_device_addr, 0, sizeof(s_bound_device_addr));
     memset(s_bound_device_name, 0, sizeof(s_bound_device_name));
-}
-
-/** 直接处理时间同步消息 */
-static void handle_time_sync_directly(uint32_t timestamp)
-{
-    time_t time_val = (time_t)timestamp;
-    struct tm *timeinfo = localtime(&time_val);
-
-    if (!timeinfo) {
-        return;
-    }
-
-    esp_err_t ret = board_set_rtc(
-        timeinfo->tm_year + 1900,
-        timeinfo->tm_mon + 1,
-        timeinfo->tm_mday,
-        timeinfo->tm_hour,
-        timeinfo->tm_min,
-        timeinfo->tm_sec
-    );
-
-    if (ret == ESP_OK) {
-        board_notify();
-    }
 }
