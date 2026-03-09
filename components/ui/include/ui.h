@@ -68,6 +68,12 @@ void ui_set_brightness(uint8_t level);
 void ui_system_restart(void);
 
 /**
+ * @brief 获取最后活动时间戳
+ * @return uint32_t 最后活动时间（毫秒）
+ */
+uint32_t ui_get_last_activity_time(void);
+
+/**
  * @brief 刷新待执行的延迟 NVS 持久化操作
  *
  * ui_delete_current_message() 和 ui_set_brightness() 在 ui_on_key() 持锁时

@@ -27,7 +27,7 @@ static inline void ui_unlock(void) {
     }
 }
 
-#define STANDBY_TIMEOUT_MS 30000
+#define STANDBY_TIMEOUT_MS 60000  // 60 秒无操作进入待机（黑屏）
 #define DEFAULT_BRIGHTNESS 100
 
 /* ================== 延迟 NVS 保存状态 ================== */
@@ -113,6 +113,10 @@ int ui_get_unread_count(void) {
         if(!s_ui.messages[i].is_read) unread++;
     }
     return unread;
+}
+
+uint32_t ui_get_last_activity_time(void) {
+    return s_ui.last_activity_time;
 }
 
 ui_message_t* ui_get_message_at(int idx) {
@@ -236,11 +240,11 @@ uint32_t ui_tick(void) {
     if (s_ui.state != UI_STATE_STANDBY) {
         // 检查自动待机超时
         if (board_time_ms() - s_ui.last_activity_time > STANDBY_TIMEOUT_MS) {
-            ESP_LOGD(UI_TAG, "Activity timeout, entering standby");
+            ESP_LOGD(UI_TAG, "Activity timeout, entering standby (black screen)");
             ui_enter_standby(); // 状态变为 STANDBY
             render_state = UI_STATE_STANDBY;
             s_needs_redraw = true;
-            next_sleep_ms = 50; // 待机动画刷新率
+            next_sleep_ms = 1000; // 待机黑屏，降低刷新率
         } else {
             // 调用当前页面的 update 逻辑
             if (s_pages[s_ui.state] && s_pages[s_ui.state]->update) {
@@ -249,9 +253,9 @@ uint32_t ui_tick(void) {
             }
         }
     } else {
-        // 待机状态逻辑
-        next_sleep_ms = 50; // 动画刷新率 20fps
-        s_needs_redraw = true; // 待机状态始终重绘动画
+        // 待机状态（黑屏）- 不渲染动画，降低刷新率以省电
+        next_sleep_ms = 1000; // 1 秒检查一次即可
+        s_needs_redraw = false; // 黑屏不渲染
     }
 
     // 2. 决定是否渲染
@@ -380,13 +384,13 @@ void ui_enter_standby(void) {
     if (s_ui.state != UI_STATE_STANDBY) {
         // 使用统一的页面切换流程以触发当前页面的 exit handler
         ui_change_page(UI_STATE_STANDBY);
-        // 渲染待机屏保
-        ui_render_standby();
+        // 黑屏：不渲染待机动画，直接关闭显示以省电
+        board_display_set_contrast(0);
         // 进入待机时，只有手电筒未开启才关闭 LED
         if (!s_ui.flashlight_on) {
             board_leds_off();
         }
-        ESP_LOGI(UI_TAG, "Entered standby");
+        ESP_LOGI(UI_TAG, "Entered standby (black screen)");
     }
 }
 

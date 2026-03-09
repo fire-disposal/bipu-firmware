@@ -2,6 +2,7 @@
 #include "board.h"
 #include "ble_manager.h"
 #include "ui.h"
+#include "sleep.h"
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_timer.h"
@@ -62,6 +63,9 @@ static void gui_task(void* pvParameters)
 esp_err_t app_init(void)
 {
     esp_err_t ret = ESP_OK;
+
+    /* 0. 初始化电源管理模块 */
+    board_power_mgmt_init();
 
     /* 1. 初始化 BLE */
     ret = ble_manager_init();
@@ -126,9 +130,16 @@ void app_loop(void)
     /* 5. LED 状态机轮询 */
     board_leds_tick();
 
-    /* 6. 非关键路径 (200ms) */
-    static uint32_t s_slow_tick_time = 0;
+    /* 6. 电源管理（每 200ms 检查一次） */
+    static uint32_t s_power_check_time = 0;
     uint32_t now = board_time_ms();
+    if (now - s_power_check_time >= 200) {
+        s_power_check_time = now;
+        board_power_mgmt_tick();
+    }
+
+    /* 7. 非关键路径 (200ms) */
+    static uint32_t s_slow_tick_time = 0;
     if (now - s_slow_tick_time >= 200) {
         s_slow_tick_time = now;
         ble_manager_poll();

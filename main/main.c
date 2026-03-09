@@ -1,6 +1,7 @@
 #include "board.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -67,7 +68,17 @@ void app_main(void) {
     esp_err_t err = ESP_OK;
 
     // ═══════════════════════════════════════════════════
-    // 阶段1 【视觉优先】早期显示初始化
+    // 阶段 0 检查唤醒原因（电源管理模块会处理）
+    // ═══════════════════════════════════════════════════
+    esp_sleep_source_t wake_cause = esp_sleep_get_wakeup_cause();
+    if (wake_cause != ESP_SLEEP_WAKEUP_UNDEFINED) {
+        ESP_LOGI(MAIN_TAG, "Wakeup from sleep, cause=%d", wake_cause);
+    } else {
+        ESP_LOGI(MAIN_TAG, "Cold boot");
+    }
+
+    // ═══════════════════════════════════════════════════
+    // 阶段 1【视觉优先】早期显示初始化
     // 仅启动 I2C 总线 + 显示屏，让用户尽快看到屏幕
     // ═══════════════════════════════════════════════════
     ESP_LOGI(MAIN_TAG, "Initializing I2C...");
@@ -81,7 +92,7 @@ void app_main(void) {
     board_display_init(); // 内部含 100ms 硬件复位序列，无需额外延时
 
     // ═══════════════════════════════════════════════════
-    // 阶段2 NVS 初始化（app_init/ui_init 需要）
+    // 阶段 2 NVS 初始化（app_init/ui_init 需要）
     // ═══════════════════════════════════════════════════
     err = init_nvs();
     if (err != ESP_OK) {
@@ -92,7 +103,7 @@ void app_main(void) {
     }
 
     // ═══════════════════════════════════════════════════
-    // 阶段3 完整硬件初始化
+    // 阶段 3 完整硬件初始化
     // board_init 内部会跳过已初始化的 I2C 和 Display（重入保护）
     // ═══════════════════════════════════════════════════
     err = board_init();
@@ -110,7 +121,7 @@ void app_main(void) {
     ESP_LOGI(MAIN_TAG, "硬件初始化成功");
 
     // ═══════════════════════════════════════════════════
-    // 阶段4 应用层初始化（含 ui_init + ble_init，仅调用一次）
+    // 阶段 4 应用层初始化（含 ui_init + ble_init + 电源管理，仅调用一次）
     // ═══════════════════════════════════════════════════
     err = app_init();
     if (err != ESP_OK) {
@@ -125,7 +136,7 @@ void app_main(void) {
     vTaskDelay(pdMS_TO_TICKS(200));
 
     // ═══════════════════════════════════════════════════
-    // 阶段5 启动 BLE 广播等后台服务
+    // 阶段 5 启动 BLE 广播等后台服务
     // ═══════════════════════════════════════════════════
     esp_err_t srv_ret = app_start_services();
     if (srv_ret != ESP_OK) {
@@ -133,7 +144,7 @@ void app_main(void) {
     }
 
     // ═══════════════════════════════════════════════════
-    // 阶段6 创建应用主任务（双核绑 Core 1 避让 BLE，单核绑 Core 0）
+    // 阶段 6 创建应用主任务（双核绑 Core 1 避让 BLE，单核绑 Core 0）
     // ═══════════════════════════════════════════════════
     BaseType_t xReturned = xTaskCreatePinnedToCore(
         app_task,
