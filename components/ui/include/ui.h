@@ -59,7 +59,7 @@ void ui_navigate_to_page(ui_page_base_t* page, void* params);
 /**
  * @brief 返回上一页（新架构）
  */
-void ui_go_back(void);
+void ui_go_back_page(void);
 
 /**
  * @brief 请求重绘 UI
@@ -72,6 +72,26 @@ void ui_request_redraw(void);
  * @param cb 回调函数，通常用于唤醒 GUI 任务
  */
 void ui_set_redraw_callback(void (*cb)(void));
+
+/* ================== 旧架构接口（向后兼容） ================== */
+
+/**
+ * @brief 切换页面（旧接口，不推荐使用）
+ * @deprecated 请使用 ui_navigate_to_page()
+ */
+void ui_change_page(ui_state_enum_t new_state);
+
+/**
+ * @brief 渲染待机画面（旧接口）
+ * @deprecated 新架构使用 page_render()
+ */
+void ui_render_standby(void);
+
+/**
+ * @brief 渲染主页面（旧接口）
+ * @deprecated 新架构使用 page_main_render()
+ */
+void ui_render_main(int message_count, int unread_count);
 
 /* ================== 消息数据接口 ================== */
 int ui_get_message_count(void);
