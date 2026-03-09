@@ -10,6 +10,7 @@ extern "C" {
 
 #include "ui_types.h"
 #include "pages/page_base.h"
+#include "ui_state_machine.h"
 
 /* ================== UI 类型定义 ================== */
 
@@ -54,12 +55,18 @@ ui_page_base_t* ui_get_settings_page(void);
  * @param page 页面对象
  * @param params 参数（可选）
  */
-void ui_navigate_to_page(ui_page_base_t* page, void* params);
+static inline void ui_navigate_to_page(ui_page_base_t* page, void* params)
+{
+    ui_state_machine_navigate(page, params);
+}
 
 /**
  * @brief 返回上一页（新架构）
  */
-void ui_go_back_page(void);
+void ui_go_back_page(void)
+{
+    ui_state_go_back();
+}
 
 /**
  * @brief 请求重绘 UI

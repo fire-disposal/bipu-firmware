@@ -8,9 +8,9 @@ idf_component_register(
         "ui_text.c"
         "pages/page_base.c"
         "pages/page_main.c"
-        "src/ui_page_list.c"
-        "src/ui_page_message.c"
-        "src/ui_page_settings.c"
+        "pages/page_list.c"
+        "pages/page_message.c"
+        "pages/page_settings.c"
     INCLUDE_DIRS
         "include"
         "."

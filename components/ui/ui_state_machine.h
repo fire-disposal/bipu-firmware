@@ -63,14 +63,14 @@ esp_err_t ui_state_machine_init(void);
  * @return true 成功
  * @return false 失败（栈满或锁定）
  */
-bool ui_navigate(ui_page_base_t* page, void* params);
+bool ui_state_machine_navigate(ui_page_base_t* page, void* params);
 
 /**
  * @brief 返回上一页（出栈）
  * @return true 成功
  * @return false 失败（栈空或锁定）
  */
-bool ui_go_back(void);
+bool ui_state_go_back(void);
 
 /**
  * @brief 替换当前页面（不压栈）

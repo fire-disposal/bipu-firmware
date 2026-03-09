@@ -30,7 +30,7 @@ esp_err_t ui_state_machine_init(void)
     return ESP_OK;
 }
 
-bool ui_navigate(ui_page_base_t* page, void* params)
+bool ui_state_machine_navigate(ui_page_base_t* page, void* params)
 {
     if (page == NULL) {
         ESP_LOGE(TAG, "Navigate to NULL page");
@@ -71,7 +71,7 @@ bool ui_navigate(ui_page_base_t* page, void* params)
     return true;
 }
 
-bool ui_go_back(void)
+bool ui_state_go_back(void)
 {
     if (s_instance.locked) {
         ESP_LOGW(TAG, "State machine locked, go_back deferred");
