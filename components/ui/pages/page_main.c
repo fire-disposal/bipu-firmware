@@ -102,14 +102,14 @@ static void page_main_on_key(ui_page_base_t* page, board_key_t key)
             if (ui_get_message_count() > 0) {
                 int cnt = ui_get_message_count();
                 ui_set_current_message_idx(cnt - 1);
-                ui_change_page(UI_STATE_MESSAGE_LIST);  // 临时使用旧接口
+                ui_navigate_to_page(ui_get_list_page(), NULL);
             } else {
                 ui_show_toast("暂无消息", 1500);
             }
             break;
             
         case BOARD_KEY_UP:
-            ui_change_page(UI_STATE_SETTINGS);  // 临时使用旧接口
+            ui_navigate_to_page(ui_get_settings_page(), NULL);
             break;
             
         case BOARD_KEY_BACK_LONG:

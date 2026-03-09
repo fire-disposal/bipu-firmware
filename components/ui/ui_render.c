@@ -17,8 +17,8 @@ static int prev_utf8_start(const char *s, int idx) {
         idx--;
         if (((unsigned char)s[idx] & 0xC0) != 0x80)
             break;
-    }
-    return idx;
+  }
+  return idx;
 }
 
 /* ================== 基础绘制原语实现 ================== */

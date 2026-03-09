@@ -354,35 +354,8 @@ void ui_toast_dismiss(void) {
     }
 }
 
-/* ================== 向后兼容接口 ================== */
-void ui_change_page(ui_state_enum_t new_state) {
-    // 临时兼容层，最终将移除
-    if (new_state == UI_STATE_MAIN) {
-        ui_navigate_to_page(ui_get_main_page(), NULL);
-    } else if (new_state == UI_STATE_MESSAGE_LIST) {
-        ui_navigate_to_page(ui_get_list_page(), NULL);
-    } else if (new_state == UI_STATE_MESSAGE_READ) {
-        ui_navigate_to_page(ui_get_message_page(), NULL);
-    } else if (new_state == UI_STATE_SETTINGS) {
-        ui_navigate_to_page(ui_get_settings_page(), NULL);
-    }
-}
-
-void ui_enter_standby(void) {
-    board_display_set_contrast(0);
-    board_leds_off();
-}
-
-void ui_wake_up(void) {
-    ui_navigate_to_page(ui_get_main_page(), NULL);
-    ui_update_activity();
-}
-
-bool ui_is_in_standby(void) {
-    return false;  // 新架构不使用 standby 状态
-}
-
 /* ================== 状态机导航包装 ================== */
-void ui_navigate_to_page(ui_page_base_t* page, void* params) {
+void ui_navigate_to_page(ui_page_base_t* page, void* params)
+{
     ui_state_machine_navigate(page, params);
 }

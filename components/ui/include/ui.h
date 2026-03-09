@@ -12,23 +12,27 @@ extern "C" {
 #include "pages/page_base.h"
 #include "ui_state_machine.h"
 
-/* ================== UI 类型定义 ================== */
-
-typedef enum {
-    UI_STATE_STANDBY,      // 待机黑屏
-    UI_STATE_MAIN,         // 主界面（时钟/状态）
-    UI_STATE_MESSAGE_LIST, // 消息列表
-    UI_STATE_MESSAGE_READ, // 消息阅读
-    UI_STATE_SETTINGS,     // 设置页面
-} ui_state_enum_t;
-
 /* ================== UI 核心接口 ================== */
 
+/**
+ * @brief UI 初始化
+ * 在系统启动时调用一次
+ */
 void ui_init(void);
-uint32_t ui_tick(void); // 返回下一次 tick 的等待时间 (ms)
+
+/**
+ * @brief UI 周期 tick（由 GUI 任务调用）
+ * @return 下次 tick 的等待时间 (ms)
+ */
+uint32_t ui_tick(void);
+
+/**
+ * @brief 按键处理（由 app_task 调用）
+ * @param key 按键值
+ */
 void ui_on_key(board_key_t key);
 
-/* ================== 新架构接口（推荐使用） ================== */
+/* ================== 页面获取接口 ================== */
 
 /**
  * @brief 获取主页面对象
@@ -50,24 +54,22 @@ ui_page_base_t* ui_get_message_page(void);
  */
 ui_page_base_t* ui_get_settings_page(void);
 
+/* ================== 导航接口 ================== */
+
 /**
- * @brief 导航到新页面（新架构）
+ * @brief 导航到新页面
  * @param page 页面对象
  * @param params 参数（可选）
  */
 void ui_navigate_to_page(ui_page_base_t* page, void* params);
 
 /**
- * @brief 返回上一页（新架构）
+ * @brief 返回上一页
  */
-void ui_go_back_page(void)
-{
-    ui_state_go_back();
-}
+void ui_go_back_page(void);
 
 /**
  * @brief 请求重绘 UI
- * 当 UI 状态发生变化需要刷新屏幕时调用
  */
 void ui_request_redraw(void);
 
@@ -77,86 +79,121 @@ void ui_request_redraw(void);
  */
 void ui_set_redraw_callback(void (*cb)(void));
 
-/* ================== 旧架构接口（向后兼容） ================== */
-
-/**
- * @brief 切换页面（旧接口，不推荐使用）
- * @deprecated 请使用 ui_navigate_to_page()
- */
-void ui_change_page(ui_state_enum_t new_state);
-
-/**
- * @brief 渲染待机画面（旧接口）
- * @deprecated 新架构使用 page_render()
- */
-void ui_render_standby(void);
-
-/**
- * @brief 渲染主页面（旧接口）
- * @deprecated 新架构使用 page_main_render()
- */
-void ui_render_main(int message_count, int unread_count);
-
 /* ================== 消息数据接口 ================== */
+
+/**
+ * @brief 获取消息总数
+ */
 int ui_get_message_count(void);
+
+/**
+ * @brief 获取未读消息数
+ */
 int ui_get_unread_count(void);
+
+/**
+ * @brief 获取当前消息索引
+ */
 int ui_get_current_message_idx(void);
+
+/**
+ * @brief 设置当前消息索引
+ * @param idx 索引值
+ */
 void ui_set_current_message_idx(int idx);
+
+/**
+ * @brief 获取指定索引的消息
+ * @param idx 消息索引
+ * @return 消息指针，NULL 表示越界
+ */
 ui_message_t* ui_get_message_at(int idx);
 
-/* ================== 业务接口 ================== */
-void ui_show_message(const char* sender, const char* text);
-void ui_show_message_with_timestamp(const char* sender, const char* text, uint32_t timestamp);
-void ui_delete_current_message(void);
-void ui_enter_standby(void);
-void ui_wake_up(void);
+/* ================== 消息业务接口 ================== */
 
-// 查询是否处于待机屏保状态
-bool ui_is_in_standby(void);
+/**
+ * @brief 显示新消息
+ * @param sender 发送者
+ * @param text 消息内容
+ */
+void ui_show_message(const char* sender, const char* text);
+
+/**
+ * @brief 显示新消息（带时间戳）
+ * @param sender 发送者
+ * @param text 消息内容
+ * @param timestamp 时间戳
+ */
+void ui_show_message_with_timestamp(const char* sender, const char* text, uint32_t timestamp);
+
+/**
+ * @brief 删除当前消息
+ */
+void ui_delete_current_message(void);
 
 /* ================== 手电筒接口 ================== */
+
+/**
+ * @brief 查询手电筒状态
+ * @return true 已开启，false 已关闭
+ */
 bool ui_is_flashlight_on(void);
+
+/**
+ * @brief 切换手电筒状态
+ */
 void ui_toggle_flashlight(void);
 
-/* ================== 设置接口 ================== */
+/* ================== 亮度控制 ================== */
+
+/**
+ * @brief 获取当前亮度
+ * @return 亮度百分比 (10-100)
+ */
 uint8_t ui_get_brightness(void);
+
+/**
+ * @brief 设置亮度
+ * @param level 亮度百分比 (10-100)
+ */
 void ui_set_brightness(uint8_t level);
 
-/* ================== 系统控制接口 ================== */
+/* ================== 系统控制 ================== */
+
+/**
+ * @brief 系统重启
+ */
 void ui_system_restart(void);
 
 /**
  * @brief 获取最后活动时间戳
- * @return uint32_t 最后活动时间（毫秒）
+ * @return 时间戳（毫秒）
  */
 uint32_t ui_get_last_activity_time(void);
 
 /**
- * @brief 刷新待执行的延迟 NVS 持久化操作
- *
- * ui_delete_current_message() 和 ui_set_brightness() 在 ui_on_key() 持锁时
- * 被调用，不能在锁内直接写 NVS（约 10-50ms）。它们会将待写数据快照到模块变量，
- * 然后由 app_loop() 在无锁状态下调用此函数完成实际写入。
- *
- * 必须在 app_task 上下文中、非锁内调用。
+ * @brief 刷新待执行的延迟 NVS 持久化
+ * 必须在 app_task 上下文中、非锁内调用
  */
 void ui_flush_pending_saves(void);
 
-/* ================== Toast / HUD 接口 ================== */
+/* ================== Toast 提示 ================== */
+
 /**
- * @brief 在屏幕中央弹出文字提示（类 Android Toast）
- *
- * 任意按键可立即消除。提示覆盖在当前页面之上，不切换页面。
- *
- * @param msg          显示文本（最多 63 个字节，支持中英文）
- * @param auto_dismiss_ms 自动消失时间 ms，0 = 不自动消失（仅靠按键消除）
+ * @brief 显示 Toast 提示
+ * @param msg 显示文本
+ * @param auto_dismiss_ms 自动消失时间 (ms)，0=不自动消失
  */
 void ui_show_toast(const char *msg, uint32_t auto_dismiss_ms);
 
-/** @brief 当前是否有 Toast 正在显示 */
+/**
+ * @brief 查询 Toast 是否可见
+ */
 bool ui_toast_is_visible(void);
 
-/** @brief 立即关闭 Toast（由按键或外部逻辑调用） */
+/**
+ * @brief 关闭 Toast
+ */
 void ui_toast_dismiss(void);
 
 #ifdef __cplusplus

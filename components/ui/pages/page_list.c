@@ -119,12 +119,9 @@ static void page_list_on_key(ui_page_base_t* page, board_key_t key)
                 ui_message_t* msg = ui_get_message_at(s_ctx.selected_index);
                 if (msg && !msg->is_read) {
                     msg->is_read = true;
-                    // NVS 保存由 ui_flush_pending_saves 处理
                 }
                 
-                // TODO: 导航到消息阅读页面
-                // ui_navigate_to_page(ui_get_message_page(), NULL);
-                ui_change_page(UI_STATE_MESSAGE_READ);
+                ui_navigate_to_page(ui_get_message_page(), NULL);
             }
             break;
             
