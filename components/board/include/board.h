@@ -27,12 +27,6 @@ typedef enum {
     BOARD_KEY_DOWN_LONG,
     BOARD_KEY_ENTER_LONG,
     BOARD_KEY_BACK_LONG,
-    /* 长按后持续重复：以 REPEAT_RATE_MS 间隔连续生成，
-     * 用于实现消息列表/内容快速滚动。 */
-    BOARD_KEY_UP_REPEAT,
-    BOARD_KEY_DOWN_REPEAT,
-    BOARD_KEY_ENTER_REPEAT,
-    BOARD_KEY_BACK_REPEAT,
 } board_key_t;
 
 typedef struct {
@@ -95,6 +89,7 @@ void board_vibrate_double(void);
 void board_vibrate_pattern(const uint32_t* ms_array, uint8_t count);
 void board_vibrate_off(void);
 void board_vibrate_tick(void); // 必须在 main loop 调用
+void board_vibrate_test_direct(uint32_t duration_ms); // 测试用：直接GPIO输出
 
 /* ================== RTC (实时时钟) 接口 ================== */
 /**
@@ -116,6 +111,17 @@ esp_err_t board_set_rtc(uint16_t year, uint8_t month, uint8_t day,
  * @return ESP_OK 成功，其他值表示错误
  */
 esp_err_t board_set_rtc_from_timestamp(time_t timestamp);
+
+/**
+ * @brief 从 NVS 恢复上次 BLE 时间同步的系统时间
+ * 
+ * 在启动时调用此函数恢复系统时间。如果存在同步记录，则：
+ *   恢复时间 = 上次同步时间 + (当前 esp_timer - 同步时的 esp_timer)
+ * 
+ * 如果无同步记录（首次启动），系统时间初始化为 Unix Epoch，
+ * 直到首次收到 BLE 时间同步消息。
+ */
+void board_restore_time_from_sync(void);
 
 /* ================== 反馈接口 ================== */
 void board_notify(void);

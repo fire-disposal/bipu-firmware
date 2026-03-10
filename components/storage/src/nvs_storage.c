@@ -165,3 +165,65 @@ esp_err_t storage_load_brightness(uint8_t* out_brightness) {
     return err;
 }
 
+/* ================== 时间同步存储接口 ================== */
+
+esp_err_t storage_save_time_sync(uint32_t timestamp, uint64_t esp_timer_us) {
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+
+    // 保存 Unix 时间戳 (u32)
+    err = nvs_set_u32(h, "time_sync_ts", timestamp);
+    if (err != ESP_OK) {
+        nvs_close(h);
+        return err;
+    }
+
+    // 保存系统计时器值 (u64)
+    err = nvs_set_u64(h, "time_sync_us", esp_timer_us);
+    if (err == ESP_OK) err = nvs_commit(h);
+
+    nvs_close(h);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Time sync saved: timestamp=%lu, esp_timer=%llu", (unsigned long)timestamp, (unsigned long long)esp_timer_us);
+    } else {
+        ESP_LOGE(TAG, "Failed to save time sync: %s", esp_err_to_name(err));
+    }
+
+    return err;
+}
+
+esp_err_t storage_load_time_sync(uint32_t* out_timestamp, uint64_t* out_esp_timer_us) {
+    if (!out_timestamp || !out_esp_timer_us) return ESP_ERR_INVALID_ARG;
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        if (err == ESP_ERR_NVS_NOT_FOUND) {
+            // 首次启动，无同步记录
+            *out_timestamp = 0;
+            *out_esp_timer_us = 0;
+            return ESP_ERR_NVS_NOT_FOUND;
+        }
+        return err;
+    }
+
+    // 读取时间戳
+    err = nvs_get_u32(h, "time_sync_ts", out_timestamp);
+    if (err != ESP_OK) {
+        nvs_close(h);
+        return err;
+    }
+
+    // 读取系统计时器值
+    err = nvs_get_u64(h, "time_sync_us", out_esp_timer_us);
+    nvs_close(h);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Time sync loaded: timestamp=%lu, esp_timer=%llu", (unsigned long)*out_timestamp, (unsigned long long)*out_esp_timer_us);
+    }
+
+    return err;
+}
+

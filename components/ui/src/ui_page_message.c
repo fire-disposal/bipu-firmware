@@ -3,6 +3,7 @@
 #include "ui.h"
 #include "ui_types.h"
 #include "ui_text.h"
+#include "ui_icons.h"
 #include "board.h"
 #include "u8g2.h"
 #include "esp_log.h"
@@ -260,7 +261,6 @@ static void on_key(board_key_t key) {
             break;
             
         case BOARD_KEY_DOWN:
-        case BOARD_KEY_DOWN_REPEAT:
             // 向下滚动，如果已到底部则切换到下一条
             if (s_vertical_offset < max_scroll) {
                 s_vertical_offset += SCROLL_STEP;
@@ -272,7 +272,6 @@ static void on_key(board_key_t key) {
             break;
             
         case BOARD_KEY_UP:
-        case BOARD_KEY_UP_REPEAT:
             // 向上滚动，如果已到顶部则切换到上一条
             if (s_vertical_offset > 0) {
                 s_vertical_offset -= SCROLL_STEP;

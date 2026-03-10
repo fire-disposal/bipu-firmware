@@ -171,5 +171,11 @@ esp_err_t app_start_services(void)
         vTaskDelay(pdMS_TO_TICKS(BLE_ADV_RETRY_DELAY_MS));
     }
 
+    /* 广播启动后，设置 LED 为三灯跑马状态（未连接提示） */
+    if (ret == ESP_OK) {
+        board_leds_set_mode(BOARD_LED_MODE_ADVERTISING);
+        ESP_LOGI(APP_TAG, "BLE 广播已启动，LED 设置为 ADVERTISING 模式");
+    }
+
     return ret;
 }

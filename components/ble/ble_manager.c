@@ -18,6 +18,7 @@
 #include "ble_manager.h"
 #include "bipupu_protocol.h"
 #include "board.h"
+#include "storage.h"
 
 #include "esp_bt.h"
 #include "esp_bt_main.h"
@@ -31,6 +32,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "freertos/event_groups.h"
+#include "esp_timer.h"
 #include <string.h>
 #include <time.h>
 
@@ -180,29 +182,47 @@ static uint8_t ccc_value[2] = {0x00, 0x00};
 
 /* 完整的GATT属性表 */
 static esp_gatts_attr_db_t gatt_db[HRS_IDX_NB] = {
-    // Service Declaration
-    [IDX_SVC] = {{ESP_GATT_AUTO_RSP}, {16, (uint8_t *)&primary_service_uuid, ESP_GATT_PERM_READ,
-                 sizeof(uint16_t), 16, (uint8_t *)&nus_service_uuid}},
+    // Service Declaration (索引0)
+    [IDX_SVC] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&primary_service_uuid, ESP_GATT_PERM_READ,
+         ESP_UUID_LEN_128, ESP_UUID_LEN_128, (uint8_t *)&nus_service_uuid}
+    },
 
-    // RX Characteristic Declaration
-    [IDX_RX_CHAR] = {{ESP_GATT_AUTO_RSP}, {2, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
-                     1, 1, (uint8_t *)&char_prop_read_write}},
+    // RX Characteristic Declaration (索引1)
+    [IDX_RX_CHAR] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
+         1, 1, (uint8_t *)&char_prop_read_write}
+    },
 
-    // RX Characteristic Value
-    [IDX_RX_VAL] = {{ESP_GATT_AUTO_RSP}, {16, (uint8_t *)&nus_rx_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-                    512, 512, rx_value}},
+    // RX Characteristic Value (索引2)
+    [IDX_RX_VAL] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_128, (uint8_t *)&nus_rx_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+         512, 512, rx_value}
+    },
 
-    // TX Characteristic Declaration
-    [IDX_TX_CHAR] = {{ESP_GATT_AUTO_RSP}, {2, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
-                     1, 1, (uint8_t *)&char_prop_read_notify}},
+    // TX Characteristic Declaration (索引3)
+    [IDX_TX_CHAR] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
+         1, 1, (uint8_t *)&char_prop_read_notify}
+    },
 
-    // TX Characteristic Value
-    [IDX_TX_VAL] = {{ESP_GATT_AUTO_RSP}, {16, (uint8_t *)&nus_tx_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-                    512, 512, tx_value}},
+    // TX Characteristic Value (索引4)
+    [IDX_TX_VAL] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_128, (uint8_t *)&nus_tx_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+         512, 512, tx_value}
+    },
 
-    // TX Client Characteristic Configuration Descriptor
-    [IDX_TX_CCC] = {{ESP_GATT_AUTO_RSP}, {2, (uint8_t *)&character_client_config_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
-                    2, 2, ccc_value}},
+    // TX Client Characteristic Configuration Descriptor (索引5)
+    [IDX_TX_CCC] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+         2, 2, ccc_value}
+    },
 };
 
 
@@ -230,6 +250,8 @@ static void update_ble_state(ble_state_t new_state)
 static uint8_t s_adv_data[31] = {0};
 static uint8_t s_adv_data_len = 0;
 
+// 广告数据构建（目前未使用，保留以备将来扩展）
+__attribute__((unused))
 static esp_err_t build_adv_data(void)
 {
     uint8_t *p = s_adv_data;
@@ -857,6 +879,13 @@ static void handle_time_sync_directly(uint32_t timestamp)
     );
 
     if (ret == ESP_OK) {
+        // 保存同步时间戳和系统计时器值，用于启动时恢复
+        uint64_t esp_timer_us = esp_timer_get_time();
+        esp_err_t save_ret = storage_save_time_sync(timestamp, esp_timer_us);
+        if (save_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to save time sync to NVS: %s", esp_err_to_name(save_ret));
+        }
+        
         board_notify();
     }
 }

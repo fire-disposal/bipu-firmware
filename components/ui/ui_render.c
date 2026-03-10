@@ -4,7 +4,6 @@
 #include "u8g2.h"
 #include "ui.h"
 #include "ui_icons.h"
-#include "ui_status.h"
 #include "ui_text.h"
 #include <stdio.h>
 #include <string.h>
@@ -29,15 +28,20 @@ static int prev_utf8_start_local(const char *s, int idx) {
   return idx;
 }
 
-static void ui_render_status_bar(const char *center_text) {
-  ui_status_render(center_text);
-}
-
 void ui_render_main(int message_count, int unread_count) {
   board_display_begin();
 
-  ui_render_status_bar(NULL);
+  // ========== 顶部状态栏 (电量 + BLE 状态) ==========
+  // 分割线
+  board_display_rect(0, 12, 128, 1, true);
+  
+  // 左侧：BLE 状态指示
+  ui_icon_draw_ble(2, 9);
+  
+  // 右侧：电池显示
+  ui_icon_draw_battery(106, 0);
 
+  // ========== 中间：电子钟 ==========
   // 获取当前时间
   time_t now;
   time(&now);
@@ -77,10 +81,6 @@ void ui_render_message_read(const ui_message_t *msg, int current_idx,
     return;
 
   board_display_begin();
-
-  char page_str[16];
-  snprintf(page_str, sizeof(page_str), "[%d/%d]", current_idx + 1, total_count);
-  ui_render_status_bar(page_str);
 
   // 显示发送者，使用用户图标
   board_display_set_font(u8g2_font_open_iconic_human_1x_t);
@@ -176,13 +176,21 @@ void ui_render_standby(void) {
     s_standby_tracked = true;
   }
   
-  // 60 秒后进入黑屏
+  // 60 秒后进入黑屏（停止动画计算，直接显示黑屏）
   if (now - s_standby_start_time >= 60000) {
-    board_display_set_contrast(0);
+    board_display_begin();
+    board_display_set_draw_color(0);
+    board_display_rect(0, 0, 128, 64, true);  // 绘制全黑矩形
+    board_display_set_contrast(0);            // 关闭对比度（省电）
+    board_display_end();
     return;
   }
 
   board_display_begin();
+
+  // 清除屏幕（每帧重新绘制）
+  board_display_set_draw_color(0);
+  board_display_rect(0, 0, 128, 64, true);
 
   // 周期（毫秒）—— 控制整体速度
   const uint32_t period_ms = 12000; // 12 秒一个完整图案
@@ -210,6 +218,12 @@ void ui_render_standby(void) {
   int scan_x = (int)(cx + a * sinf(fx * t + px));
   int scan_y = (int)(cy + b * sinf(fy * t + py));
 
+  // 限制坐标范围避免越界
+  if (scan_x < 0) scan_x = 0;
+  if (scan_x >= 128) scan_x = 127;
+  if (scan_y < 0) scan_y = 0;
+  if (scan_y >= 64) scan_y = 63;
+
   // 绘制十字扫描线
   board_display_set_draw_color(1);
   board_display_rect(0, scan_y, 128, 1, true);   // 水平
@@ -219,7 +233,8 @@ void ui_render_standby(void) {
   const int sq = 7;
   board_display_rect(scan_x - sq/2, scan_y - sq/2, sq, sq, false);
 
-  // Logo（无抖动，默认字体）
+  // Logo 文本（先设置字体）
+  board_display_set_font(u8g2_font_wqy12_t_gb2312a);
   const char *logo = "BIPUPU";
   int logo_w = board_display_text_width(logo);
   int base_x = (128 - logo_w) / 2;

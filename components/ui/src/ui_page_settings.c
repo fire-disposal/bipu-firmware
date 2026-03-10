@@ -2,6 +2,7 @@
 #include "ui.h"
 #include "ui_render.h"
 #include "ui_text.h"
+#include "ui_icons.h"
 #include "board.h"
 #include "u8g2.h"
 #include "esp_log.h"
@@ -77,9 +78,10 @@ static void render_about(void) {
     board_display_begin();
     board_display_set_font(u8g2_font_wqy12_t_gb2312a);
     
-    // 标题栏
+    // 顶部状态栏
     board_display_rect(0, 12, 128, 1, true);
-    ui_draw_text_centered(0, 10, 128, "关于设备");
+    board_display_text(4, 10, "关于");
+    board_display_text(106, 10, "V1.0");
     
     // 设备信息
     board_display_text(4, 26, "BIPI Pager");
@@ -94,9 +96,10 @@ static void render_unbind_confirm(void) {
     board_display_begin();
     board_display_set_font(u8g2_font_wqy12_t_gb2312a);
     
-    // 标题栏
+    // 顶部状态栏
     board_display_rect(0, 12, 128, 1, true);
-    ui_draw_text_centered(0, 10, 128, "解绑确认");
+    board_display_text(4, 10, "解绑");
+    board_display_text(100, 10, "警告");
     
     // 确认信息
     board_display_text(4, 26, "确定要解绑设备吗？");
@@ -115,9 +118,14 @@ static void render_settings(void) {
     board_display_begin();
     board_display_set_font(u8g2_font_wqy12_t_gb2312a);
     
-    // 标题栏
+    // 顶部状态栏
     board_display_rect(0, 12, 128, 1, true);
-    ui_draw_text_centered(0, 10, 128, "设置");
+    board_display_text(4, 10, "设置");
+    // 右侧显示选项序号
+    char item_str[16];
+    snprintf(item_str, sizeof(item_str), "%d/%d", s_ctx.selected_item + 1, SETTING_COUNT);
+    int sw = board_display_text_width(item_str);
+    board_display_text(124 - sw, 10, item_str);
     
     // 计算当前页码和起始项
     int page = s_ctx.selected_item / ITEMS_PER_PAGE;

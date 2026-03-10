@@ -2,7 +2,7 @@ idf_component_register(
     SRCS
         "ui.c"
         "ui_render.c"
-        "src/ui_status.c"
+        "src/ui_icons.c"
         "src/ui_text.c"
         "src/ui_page_main.c"
         "src/ui_page_list.c"

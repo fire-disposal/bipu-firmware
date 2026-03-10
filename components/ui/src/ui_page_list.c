@@ -5,6 +5,7 @@
 #include "u8g2.h"
 #include "esp_log.h"
 #include "ui_text.h"
+#include "ui_icons.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -91,19 +92,22 @@ static void render(void) {
     }
 
     board_display_begin();
-    board_display_set_font(u8g2_font_wqy12_t_gb2312a);
-
-    // 顶部标题栏
-    board_display_rect(0, 12, 128, 1, true);
-    board_display_text(4, STATUS_BAR_Y, "收件箱");
     
-    char page_str[24];
-    snprintf(page_str, sizeof(page_str), "%d/%d", s_ctx.current_page, s_ctx.total_pages);
+    // ========== 顶部状态栏 ==========
+    board_display_rect(0, 12, 128, 1, true);
+    
+    // 左侧：页面标题
+    board_display_set_font(u8g2_font_wqy12_t_gb2312a);
+    board_display_text(4, 10, "收件箱");
+    
+    // 右侧：页码显示（总消息数、当前页）
+    char page_str[32];
+    snprintf(page_str, sizeof(page_str), "第%d页 共%d条", s_ctx.current_page, s_ctx.total_pages);
     int pw = board_display_text_width(page_str);
-    board_display_text(124 - pw, STATUS_BAR_Y, page_str);
+    board_display_text(128 - pw - 4, 10, page_str);
 
-    // 列表条目区
-    int y = CONTENT_START_Y;
+    // ========== 列表条目区 ==========
+    int y = 24;  // 下移以适应顶部栏
     for (int i = 0; i < ITEMS_PER_PAGE; i++) {
         if (!s_ctx.items[i].valid) continue;
 
@@ -199,7 +203,6 @@ static void on_key(board_key_t key) {
             return;
             
         case BOARD_KEY_DOWN:
-        case BOARD_KEY_DOWN_REPEAT:
             if (idx < total - 1) {
                 idx++;
             } else {
@@ -209,7 +212,6 @@ static void on_key(board_key_t key) {
             return;
             
         case BOARD_KEY_UP:
-        case BOARD_KEY_UP_REPEAT:
             if (idx > 0) {
                 idx--;
             } else {

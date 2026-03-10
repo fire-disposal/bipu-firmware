@@ -27,7 +27,8 @@ static inline void ui_unlock(void) {
     }
 }
 
-#define STANDBY_TIMEOUT_MS 30000
+#define STANDBY_TIMEOUT_MS 30000  /* 30 秒后进入屏保 */
+#define BLACKSCREEN_TIMEOUT_MS 30000 /* 屏保播放 30 秒后进入黑屏 */
 #define DEFAULT_BRIGHTNESS 100
 
 /* ================== 延迟 NVS 保存状态 ================== */
@@ -240,7 +241,7 @@ uint32_t ui_tick(void) {
             ui_enter_standby(); // 状态变为 STANDBY
             render_state = UI_STATE_STANDBY;
             s_needs_redraw = true;
-            next_sleep_ms = 50; // 待机动画刷新率
+            next_sleep_ms = 33; // 待机动画刷新率 30fps（提升流畅性）
         } else {
             // 调用当前页面的 update 逻辑
             if (s_pages[s_ui.state] && s_pages[s_ui.state]->update) {
@@ -250,7 +251,7 @@ uint32_t ui_tick(void) {
         }
     } else {
         // 待机状态逻辑
-        next_sleep_ms = 50; // 动画刷新率 20fps
+        next_sleep_ms = 33; // 动画刷新率 30fps（提升流畅性）
         s_needs_redraw = true; // 待机状态始终重绘动画
     }
 
@@ -296,15 +297,9 @@ void ui_on_key(board_key_t key) {
     if (s_ui.state == UI_STATE_STANDBY) {
         ESP_LOGI(UI_TAG, "Waking up from standby with key %d", key);
         ui_wake_up();
-        // 唤醒后，如果按键是 ENTER 或 DOWN，继续处理
-        if (key == BOARD_KEY_ENTER || key == BOARD_KEY_DOWN || key == BOARD_KEY_UP) {
-            ESP_LOGI(UI_TAG, "Processing key %d after wake up", key);
-            // 显示已初始化，直接处理按键
-            if (s_pages[s_ui.state] && s_pages[s_ui.state]->on_key) {
-                s_pages[s_ui.state]->on_key(key);
-                ESP_LOGI(UI_TAG, "Delegated key %d to page handler for state %d", key, s_ui.state);
-            }
-        }
+        // 唤醒后切换回主界面
+        ui_change_page(UI_STATE_MAIN);
+        // 当前按键不继续处理，用户需要重新按键来控制主界面
         ui_unlock();
         return;
     }
@@ -353,6 +348,11 @@ void ui_show_message_with_timestamp(const char* sender, const char* text, uint32
     s_ui.current_msg_idx = s_ui.message_count - 1;
     /* ui_change_page 会调用 ui_request_redraw */
     ui_change_page(UI_STATE_MESSAGE_READ);
+    
+    /* 显示 toast 通知，通知用户收到新消息 */
+    char toast_msg[128];
+    snprintf(toast_msg, sizeof(toast_msg), "新消息来自 %s", sender);
+    ui_show_toast(toast_msg, 3000);
 
     /* 快照消息数组以供锁外持久化
      * NVS 写入约 10-50ms，在锁内执行会导致：
@@ -400,11 +400,21 @@ bool ui_is_in_standby(void) {
 
 void ui_wake_up(void) {
     if (s_ui.state == UI_STATE_STANDBY) {
+        // 强制清屏并恢复显示驱动初始状态
+        // 这是必要的，因为屏保黑屏状态可能导致显示驱动出现坐标系偏移
+        board_display_begin();
+        board_display_set_draw_color(0);
+        board_display_rect(0, 0, 128, 64, true);  // 清空缓冲区
+        board_display_end();
+        
         ui_change_page(UI_STATE_MAIN);
         ui_update_activity();
-        // 恢复亮度
+        // 恢复显示驱动状态（屏保可能修改了这些状态）
         board_display_set_contrast((uint8_t)((s_ui.brightness * 255) / 100));
-        ESP_LOGI(UI_TAG, "Woke up");
+        board_display_set_draw_color(1);  // 恢复绘制颜色为白
+        // 重置待机计时器，以便下次进入待机时重新计时
+        ui_render_standby_reset_timer();
+        ESP_LOGI(UI_TAG, "Woke up from standby, display cleared and state restored, timer reset");
     }
 }
 
