@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <sys/time.h>
+#include <stdlib.h>
 
 // I2C总线句柄定义
 i2c_master_bus_handle_t board_i2c_bus_handle = NULL;
@@ -18,6 +19,11 @@ static board_cleanup_callback_t s_cleanup_callback = NULL;
 /* ================== 板级初始化 ================== */
 esp_err_t board_init(void) {
   ESP_LOGI(BOARD_TAG, "Initializing board...");
+
+  // 设置时区为中国标准时间 (UTC+8)
+  setenv("TZ", "CST-8", 1);
+  tzset();
+  ESP_LOGI(BOARD_TAG, "Timezone set to CST-8 (UTC+8)");
 
   // 各模块初始化
   // 注意：部分模块可能依赖 I2C 或其他基础配置，需注意初始化顺序

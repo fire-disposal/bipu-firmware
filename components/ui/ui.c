@@ -349,10 +349,10 @@ void ui_show_message_with_timestamp(const char* sender, const char* text, uint32
     /* ui_change_page 会调用 ui_request_redraw */
     ui_change_page(UI_STATE_MESSAGE_READ);
     
-    /* 显示 toast 通知，通知用户收到新消息 */
-    char toast_msg[128];
-    snprintf(toast_msg, sizeof(toast_msg), "新消息来自 %s", sender);
-    ui_show_toast(toast_msg, 3000);
+    /* Toast 通知已禁用 - 收到消息时直接跳转到消息页面，无需额外提示 */
+    // char toast_msg[128];
+    // snprintf(toast_msg, sizeof(toast_msg), "新消息来自 %s", sender);
+    // ui_show_toast(toast_msg, 3000);
 
     /* 快照消息数组以供锁外持久化
      * NVS 写入约 10-50ms，在锁内执行会导致：

@@ -35,6 +35,7 @@
 #include "esp_timer.h"
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 
 
 /* ================== 绑定相关常量 ================== */
@@ -250,8 +251,17 @@ static void update_ble_state(ble_state_t new_state)
 static uint8_t s_adv_data[31] = {0};
 static uint8_t s_adv_data_len = 0;
 
-// 广告数据构建（目前未使用，保留以备将来扩展）
-__attribute__((unused))
+/* 广告参数配置 */
+static esp_ble_adv_params_t adv_params = {
+    .adv_int_min        = 0x20,    // 20ms (单位 0.625ms)
+    .adv_int_max        = 0x40,    // 40ms
+    .adv_type           = ADV_TYPE_IND,
+    .own_addr_type      = BLE_ADDR_TYPE_PUBLIC,
+    .channel_map        = ADV_CHNL_ALL,
+    .adv_filter_policy  = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
+};
+
+// 广告数据构建
 static esp_err_t build_adv_data(void)
 {
     uint8_t *p = s_adv_data;
@@ -302,10 +312,9 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param
 {
     switch (event) {
         case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT:
-            ESP_LOGI(TAG, "广告数据设置完成");
-            if (s_ble_state == BLE_STATE_IDLE) {
-                start_advertising();
-            }
+            ESP_LOGI(TAG, "广告数据设置完成，现在真正启动广播");
+            // 收到数据配置成功的事件后，再执行启动
+            esp_ble_gap_start_advertising(&adv_params);
             break;
 
         case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
@@ -372,6 +381,18 @@ static void gatts_profile_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_
                 update_ble_state(BLE_STATE_IDLE);
             } else {
                 ESP_LOGE(TAG, "属性表创建失败：%d", param->add_attr_tab.status);
+                update_ble_state(BLE_STATE_ERROR);
+            }
+            break;
+        }
+
+        case ESP_GATTS_START_EVT: {
+            if (param->start.status == ESP_GATT_OK) {
+                ESP_LOGI(TAG, "GATT服务启动成功，开始广播");
+                // 服务启动成功后，立即开始广播
+                start_advertising();
+            } else {
+                ESP_LOGE(TAG, "GATT服务启动失败：%d", param->start.status);
                 update_ble_state(BLE_STATE_ERROR);
             }
             break;
@@ -608,9 +629,19 @@ static esp_err_t start_advertising(void)
         return ESP_OK;
     }
 
-    // 广告数据已在 build_adv_data 中准备好
-    // 仅返回成功状态
-    update_ble_state(BLE_STATE_ADVERTISING);
+    // 先构建广告数据
+    build_adv_data();
+    
+    // 触发 GAP 设置原始广告数据
+    // 实际广播将在 ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT 事件中启动
+    esp_err_t ret = esp_ble_gap_config_adv_data_raw(s_adv_data, s_adv_data_len);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "设置广告数据失败: %s", esp_err_to_name(ret));
+        update_ble_state(BLE_STATE_ERROR);
+        return ret;
+    }
+    
+    ESP_LOGI(TAG, "正在配置广告数据...");
     return ESP_OK;
 }
 
@@ -862,23 +893,24 @@ static bool check_binding_match(void)
 
 static void handle_time_sync_directly(uint32_t timestamp)
 {
-    time_t time_val = (time_t)timestamp;
-    struct tm *timeinfo = localtime(&time_val);
-
-    if (!timeinfo) {
-        return;
-    }
-
-    esp_err_t ret = board_set_rtc(
-        timeinfo->tm_year + 1900,
-        timeinfo->tm_mon + 1,
-        timeinfo->tm_mday,
-        timeinfo->tm_hour,
-        timeinfo->tm_min,
-        timeinfo->tm_sec
-    );
-
+    ESP_LOGI(TAG, "收到时间同步: timestamp=%u", timestamp);
+    
+    // 直接使用时间戳设置系统时间
+    struct timeval tv;
+    tv.tv_sec = (time_t)timestamp;
+    tv.tv_usec = 0;
+    
+    esp_err_t ret = settimeofday(&tv, NULL);
     if (ret == ESP_OK) {
+        // 打印设置后的本地时间
+        time_t now = (time_t)timestamp;
+        struct tm *timeinfo = localtime(&now);
+        if (timeinfo) {
+            ESP_LOGI(TAG, "系统时间已更新: %04d-%02d-%02d %02d:%02d:%02d",
+                     timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
+                     timeinfo->tm_hour, timeinfo->tm_min, timeinfo->tm_sec);
+        }
+        
         // 保存同步时间戳和系统计时器值，用于启动时恢复
         uint64_t esp_timer_us = esp_timer_get_time();
         esp_err_t save_ret = storage_save_time_sync(timestamp, esp_timer_us);
@@ -887,6 +919,8 @@ static void handle_time_sync_directly(uint32_t timestamp)
         }
         
         board_notify();
+    } else {
+        ESP_LOGE(TAG, "设置系统时间失败: %s", esp_err_to_name(ret));
     }
 }
 
