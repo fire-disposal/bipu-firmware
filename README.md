@@ -1,197 +1,80 @@
-# Bipupu ESP32 智能终端固件
+# Bipupu Firmware
 
-基于 ESP-IDF 的嵌入式应用，集成 OLED 显示、按键输入、BLE 通信、消息管理等功能，适用于小型智能终端设备。
+给 Bipupu App 配的那块小屏固件：ESP32-C3 接 128×64 OLED、四个按键和振动马达，通过 BLE 收手机发来的文字消息并存在本地。
 
-## 功能特性
+**状态**：可用（v1.2.0，需手动烧录）；**入口**：`idf.py build flash monitor`；**仓库**：本仓库；App 与后端在 [bipu](https://github.com/fire-disposal/bipu)
 
-- **显示系统**：基于 u8g2 图形库，支持 128x64 OLED 显示屏
-- **用户交互**：物理按键输入（上/下/确认/返回），支持多页面导航
-- **BLE 通信**：低功耗蓝牙 GATT 服务，支持消息收发、设备绑定
-- **消息管理**：本地消息存储（NVS 持久化），支持消息列表、阅读、删除
-- **电源管理**：待机黑屏、亮度调节、Light Sleep 支持
-- **UI 系统**：多页面状态机（主界面、消息列表、消息阅读、设置）
+## 本质
 
-## 硬件要求
+驱动 ESP32-C3 小屏、通过 BLE 接收并保存 Bipupu 消息的固件。
 
-- **主控**：ESP32-C3 或兼容芯片
-- **显示屏**：128x64 I2C OLED（SSD1306/SH1106）
-- **输入**：4 个物理按键（UP/DOWN/ENTER/BACK）
-- **其他**：蜂鸣器/震动马达（消息通知）
+## 选型
 
-## 项目结构
+基于 ESP-IDF 的 ESP32-C3 单机固件，MCU ESP32-C3，屏 128×64 I2C OLED，协议栈 Bluedroid + NUS + 0xB0，驱动 u8g2 + FreeRTOS，存储 NVS。
 
-```
-├── main/                       # 主应用代码
-│   ├── main.c                  # 程序入口
-│   ├── app.c/h                 # 应用生命周期与主逻辑
-│   ├── ui.c/h                  # UI 状态管理与接口
-│   ├── driver.c/h              # 硬件驱动抽象层
-│   ├── ble_manager.c/h         # BLE 管理器
-│   ├── message_manager.c/h     # 消息管理器
-│   ├── storage.c/h             # NVS 存储管理
-│   └── include/                # 头文件目录
-├── components/
-│   └── u8g2/                   # u8g2 显示库（第三方）
-├── CMakeLists.txt              # CMake 构建配置
-├── sdkconfig.defaults          # 默认 SDK 配置
-└── partitions.csv              # 分区表配置
-```
+- MCU
+  - ESP32-C3
+- 屏幕
+  - SSD1306 128×64
+    - u8g2
+- 协议栈
+  - Bluedroid
+    - Nordic UART Service
+    - Bipupu 协议 v1.2
+  - I2C
+- RTOS
+  - FreeRTOS
+    - app_task
+    - gui_task
+- 存储
+  - NVS
+- 外设
+  - 按键
+  - 振动马达
+  - LED
+  - ADC
+- 工具链
+  - ESP-IDF 5.5.2
+  - CMake 3.16
 
-## 构建与烧录
+## 功能
 
-### 环境要求
+- 五个页面：主界面（时钟 + 未读数）、消息列表、消息阅读、设置、屏保/黑屏
+- 消息最多 10 条，发送者 32 字节、正文 128 字节，支持滚动、切换、删除、未读计数
+- 设置项：亮度（0–100，写 NVS）、手电筒、锁屏、解绑、重启、关于
+- BLE 设备名 `Bipupu_XXXX`，MTU 517、协议载荷上限 240；未绑定时只放行绑定/解绑指令
+- 电池每 10 秒 ADC 采样并按 0.25 系数平滑，2.5–5.0V 视为有效区间，可判断充电
+- 未实现：OTA（分区表只有 `factory` + `otadata`）、Light Sleep（无 `esp_sleep_*` 调用）
 
-- ESP-IDF v5.0 或更高版本
-- Python 3.7+
-- CMake 3.16+
-
-### 构建步骤
+## 启动流程
 
 ```bash
-# 设置 ESP-IDF 环境
-. $ESP_IDF_PATH/export.sh
+git clone --recurse-submodules https://github.com/fire-disposal/bipu-firmware.git
+cd bipu-firmware
+git submodule update --init --recursive   # u8g2 是 submodule
 
-# 配置项目（可选）
-idf.py menuconfig
-
-# 编译
+. $IDF_PATH/export.sh
+idf.py set-target esp32c3
 idf.py build
-
-# 烧录并监控
-idf.py flash monitor
+idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
-### 分区配置
+接线（`components/board/include/board_pins.h`）：
 
-默认分区表 (`partitions.csv`)：
+| 功能 | GPIO |
+|---|---|
+| I2C SDA / SCL | 21 / 20 |
+| 按键 UP / DOWN / ENTER / BACK | 5 / 6 / 7 / 8 |
+| 振动马达 | 10 |
+| 电池采样 | 4 |
+| LED 0 / 1 / 2 | 0 / 1 / 3 |
+| 屏幕复位 | 2 |
 
-| 分区 | 大小 | 用途 |
-|------|------|------|
-| nvs | 20KB | NVS 存储（配置、消息） |
-| phy_init | 4KB | PHY 初始化数据 |
-| factory | 1MB | 应用程序固件 |
+## 边界与已知问题
 
-## BLE 协议规范
-
-### GATT 服务
-
-**服务 UUID**: `0x1812`（设备信息服务）
-
-**特征值**:
-
-| UUID | 属性 | 说明 |
-|------|------|------|
-| `0x2A00` | Read | 设备名称 |
-| `0x2A01` | Read | 外观特征 |
-| `0x2A04` | Read | 首选连接参数 |
-
-**自定义服务 UUID**: `6E400001-B5A3-F393-E0A9-E50E24DCCA9E`（Nordic UART）
-
-| 特征值 UUID | 属性 | 说明 |
-|-------------|------|------|
-| `6E400002-B5A3-F393-E0A9-E50E24DCCA9E` | Write | RX（接收数据） |
-| `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` | Notify | TX（发送数据） |
-
-### 消息协议
-
-**数据包格式**（JSON）：
-
-```json
-{
-  "type": "message",
-  "sender": "发送者名称",
-  "content": "消息内容",
-  "timestamp": 1234567890
-}
-```
-
-**绑定流程**:
-1. 设备上电后进入广播模式
-2. 手机 App 扫描并连接设备
-3. 发送绑定请求（含设备密钥）
-4. 设备验证并存储绑定信息
-5. 后续通信需验证绑定状态
-
-## 按键操作说明
-
-| 页面 | 上键 | 下键 | 确认键 | 返回键 |
-|------|------|------|--------|--------|
-| **主界面** | 进入设置 | 进入消息列表 | 进入消息列表 | - |
-| **消息列表** | 向上滚动 | 向下滚动 | 阅读选中消息 | 返回主界面 |
-| **消息阅读** | 向上滚动 | 向下滚动 | 删除当前消息 | 返回消息列表 |
-| **设置页面** | 向上选择 | 向下选择 | 确认/进入子项 | 返回主界面 |
-| **待机黑屏** | 唤醒 | 唤醒 | 唤醒 | 唤醒 |
-
-## 配置参数
-
-### 待机超时
-
-- 默认待机超时：60 秒无操作进入黑屏
-- Light Sleep 超时：5 分钟无操作进入低功耗模式
-
-### 显示亮度
-
-- 亮度范围：0-100（通过设置页面调节）
-- 黑屏时亮度为 0
-
-### BLE 参数
-
-- 广播间隔：100ms（可连接）/ 20ms（快速广播）
-- 连接间隔：7.5ms - 4s（自适应）
-- MTU：517 字节
-
-## 调试信息
-
-### 日志级别
-
-通过 `menuconfig` 配置日志级别：
-- Component config → Log output → Default log verbosity
-
-### 常用日志标签
-
-| 标签 | 说明 |
-|------|------|
-| `APP` | 应用层日志 |
-| `UI` | UI 系统日志 |
-| `BLE` | BLE 管理器日志 |
-| `MSG` | 消息管理器日志 |
-| `DRV` | 驱动层日志 |
-
-## 固件升级
-
-支持 OTA（Over-The-Air）升级：
-
-1. 通过 BLE 或 Wi-Fi 接收新固件
-2. 写入 OTA 分区
-3. 重启后从新版本启动
-4. 失败自动回滚
-
-## 故障排除
-
-### 无法启动
-
-- 检查电源电压（3.3V 稳定）
-- 检查 I2C 连接（显示屏）
-- 查看串口日志（波特率 115200）
-
-### BLE 连接失败
-
-- 确认设备未绑定其他手机
-- 检查 BLE 天线连接
-- 重置 NVS（擦除 flash 后重烧）
-
-### 显示异常
-
-- 检查 I2C 地址（0x3C 或 0x3D）
-- 检查显示屏供电
-- 确认 u8g2 配置与硬件匹配
-
-## 许可证
-
-本项目基于 MIT 许可证开源。u8g2 库遵循其原有许可证。
-
-## 版本历史
-
-| 版本 | 日期 | 说明 |
-|------|------|------|
-| v1.0 | 2026-03 | 初始稳定版本，完整功能实现 |
+- 旧 README 与代码不符，以代码为准：消息格式是二进制 0xB0 而非 JSON；没有 OTA 与失败回滚；没有 Light Sleep；项目结构在 `components/` 而非 `main/*.c`
+- `main/kalman_health_demo.c` 未被 `main/CMakeLists.txt` 编译，是遗留文件
+- 消息容量固定 10 条、正文 128 字节，没有按时间自动清理
+- 阅读页的确认键是“切下一条”，删除只在列表页，和旧文档描述不一致
+- 屏保与黑屏只是软件关显示，实测电流与续航数据缺失
+- 绑定只比对手机 MAC 字符串，绑定包里的 JSON 只写日志，没有配对密钥交换
